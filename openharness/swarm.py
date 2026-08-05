@@ -1,3 +1,7 @@
+"""
+Swarm module for OpenHarness.
+Provides core functionality for the swarm subsystem.
+"""
 import asyncio
 import socket
 import json
