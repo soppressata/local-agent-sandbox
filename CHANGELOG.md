@@ -1,3 +1,4 @@
+- **Feature**: Add network namespace isolation option (Issue #15)
 - **Feature**: Decentralized Swarm Intelligence Protocol for Cross-Sandbox Collaboration (Issue #14)
 # Changelog
 
