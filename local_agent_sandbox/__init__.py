@@ -1,16 +1,34 @@
 """
-LocalAgentSandbox Package
-Sub-10ms process isolation container for AI coding agents.
+Local Agent Sandbox - The Multi-Verse Agent Ecology.
+N-Dimensional Isolated Sandbox Meshing Architecture.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
-from local_agent_sandbox.core import LocalAgentSandbox, SandboxConfig, SandboxResult
-from local_agent_sandbox.policy import PolicyMemoryEngine
+from .orchestrator import UniverseOrchestrator, Universe, UniverseStatus, ComputeQuota
+from .mesh import MeshNetworkManager, TrustPolicy, TrustRule, MeshChannel, CertificateAuthority
+from .graphql_api import GodModeGraphQLAPI
+from .isolation import ResourceIsolationEngine, StorageJail, NetworkJail
+from .wasm_runtime import WasmRuntime, WasmModule, WasmBoundaryBridge, WasmCapability
+from .dashboard import DashboardServer
 
 __all__ = [
-    "LocalAgentSandbox",
-    "SandboxConfig",
-    "SandboxResult",
-    "PolicyMemoryEngine"
+    "UniverseOrchestrator",
+    "Universe",
+    "UniverseStatus",
+    "ComputeQuota",
+    "MeshNetworkManager",
+    "TrustPolicy",
+    "TrustRule",
+    "MeshChannel",
+    "CertificateAuthority",
+    "GodModeGraphQLAPI",
+    "ResourceIsolationEngine",
+    "StorageJail",
+    "NetworkJail",
+    "WasmRuntime",
+    "WasmModule",
+    "WasmBoundaryBridge",
+    "WasmCapability",
+    "DashboardServer",
 ]
