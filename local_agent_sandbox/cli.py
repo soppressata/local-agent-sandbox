@@ -1,3 +1,7 @@
+"""
+Cli module for OpenHarness.
+Provides core functionality for the cli subsystem.
+"""
 import click
 from local_agent_sandbox.core import LocalAgentSandbox, SandboxConfig
 
