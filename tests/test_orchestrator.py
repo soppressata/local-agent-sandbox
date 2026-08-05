@@ -77,3 +77,21 @@ def test_rust_orchestrator_bridge():
     assert elapsed < 2.0
     assert len(bridge.orchestrator.universes) == 1000
     bridge.orchestrator.close()
+
+
+def test_rust_orchestrator_10k_batch_and_error_handling():
+    """Verify 10,000 sandbox creation performance via Rust bridge and non-existent ID handling."""
+    bridge = RustOrchestratorBridge(use_rust=False)
+    t0 = time.time()
+    nodes = bridge.batch_create(count=10000, name_prefix="rust-10k")
+    elapsed = time.time() - t0
+
+    assert len(nodes) == 10000
+    assert elapsed < 5.0, f"10k sandboxes via Rust bridge took {elapsed:.3f}s"
+
+    # Test health check and lifecycle on non-existent universe ID
+    assert bridge.health_check("uv-nonexistent") is None
+    assert bridge.start_sandbox("uv-nonexistent") is False
+    assert bridge.stop_sandbox("uv-nonexistent") is False
+    assert bridge.destroy_sandbox("uv-nonexistent") is False
+    bridge.orchestrator.close()
