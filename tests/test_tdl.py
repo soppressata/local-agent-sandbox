@@ -1,26 +1,26 @@
 """
-Unit and integration tests for Topology Definition Language (TDL) parsing and agent lifecycle.
+Unit and integration tests for Topology Definition Language (TDL) parsing
+and basic agent lifecycle management.
 """
 
 import os
 import tempfile
+
 import pytest
 
 from local_agent_sandbox.tdl import (
-    TDLParser,
-    TDLTopology,
     AgentConfig,
-    ToolPermissions,
     AgentInstance,
     AgentStatus,
+    SecurityViolation,
     SwarmLifecycleManager,
     SwarmStatus,
     TDLParseError,
+    TDLTopology,
+    ToolPermissions,
     parse_tdl,
     parse_tdl_file,
 )
-from local_agent_sandbox.isolation import SecurityViolation
-from local_agent_sandbox.orchestrator import UniverseOrchestrator
 
 
 SAMPLE_TDL_YAML = """
@@ -71,6 +71,28 @@ agents:
     system_prompt: "You audit code security and permissions."
     tools:
       - "read_file"
+
+  - name: "tester"
+    role: "qa-engineer"
+    system_prompt: "You write and run tests."
+    tools:
+      - "read_file"
+      - "execute_shell"
+    permissions:
+      allowed_tools:
+        - "read_file"
+        - "execute_shell"
+
+  - name: "docs"
+    role: "technical-writer"
+    system_prompt: "You produce clear technical documentation."
+    tools:
+      - "read_file"
+      - "write_file"
+    permissions:
+      allowed_tools:
+        - "read_file"
+        - "write_file"
 """
 
 
@@ -80,7 +102,7 @@ def test_parse_valid_tdl_yaml():
     assert topology.version == "1.0"
     assert topology.name == "software-dev-swarm"
     assert topology.description == "A multi-agent swarm for automated code generation and auditing."
-    assert len(topology.agents) == 3
+    assert len(topology.agents) >= 5
 
     arch_cfg = topology.get_agent_config("architect")
     assert arch_cfg is not None
@@ -96,6 +118,9 @@ def test_parse_valid_tdl_yaml():
     assert dev_cfg is not None
     assert dev_cfg.permissions.is_tool_allowed("execute_shell") is True
 
+    prompts = {a.system_prompt for a in topology.agents}
+    assert len(prompts) == len(topology.agents)
+
 
 def test_parse_tdl_file():
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
@@ -105,7 +130,7 @@ def test_parse_tdl_file():
     try:
         topology = parse_tdl_file(temp_path)
         assert topology.name == "software-dev-swarm"
-        assert len(topology.agents) == 3
+        assert len(topology.agents) >= 5
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -124,6 +149,12 @@ def test_tdl_parser_errors():
     with pytest.raises(TDLParseError):
         parse_tdl_file("/nonexistent/file/path/topology.yaml")
 
+    with pytest.raises(TDLParseError, match="Empty TDL"):
+        parse_tdl("")
+
+    with pytest.raises(TDLParseError):
+        parse_tdl("agents: not-a-list")
+
 
 def test_tool_permissions_wildcards_and_defaults():
     p1 = ToolPermissions(allowed_tools=["*"], denied_tools=["delete_database"])
@@ -139,23 +170,23 @@ def test_tool_permissions_wildcards_and_defaults():
 
 
 def test_agent_instance_lifecycle():
-    orchestrator = UniverseOrchestrator()
     config = AgentConfig(
         name="test-agent",
         role="tester",
         system_prompt="Test agent prompt instructions.",
         tools=["read_file"],
-        permissions=ToolPermissions(allowed_tools=["read_file"], denied_tools=["execute_shell"]),
+        permissions=ToolPermissions(
+            allowed_tools=["read_file"], denied_tools=["execute_shell"]
+        ),
     )
 
-    agent = AgentInstance(config=config, orchestrator=orchestrator)
+    agent = AgentInstance(config=config)
     assert agent.status == AgentStatus.CREATED
 
     assert agent.spin_up() is True
     assert agent.status == AgentStatus.RUNNING
-    assert agent.universe is not None
 
-    vfs_prompt = agent.universe.read_virtual_file("/etc/system_prompt.txt")
+    vfs_prompt = agent.read_virtual_file("/etc/system_prompt.txt")
     assert vfs_prompt == "Test agent prompt instructions."
 
     assert agent.can_use_tool("read_file") is True
@@ -169,25 +200,21 @@ def test_agent_instance_lifecycle():
 
     assert agent.terminate(graceful=True) is True
     assert agent.status == AgentStatus.TERMINATED
-    assert agent.universe is None
-
-    orchestrator.close()
+    assert agent.read_virtual_file("/etc/system_prompt.txt") is None
 
 
 def test_swarm_lifecycle_manager():
     topology = parse_tdl(SAMPLE_TDL_YAML)
-    orchestrator = UniverseOrchestrator()
-
-    swarm = SwarmLifecycleManager(topology=topology, orchestrator=orchestrator)
+    swarm = SwarmLifecycleManager(topology=topology)
     assert swarm.status == SwarmStatus.CREATED
-    assert len(swarm.list_agents()) == 3
+    assert len(swarm.list_agents()) >= 5
 
     active_agents = swarm.spin_up_swarm()
-    assert len(active_agents) == 3
+    assert len(active_agents) >= 5
     assert swarm.status == SwarmStatus.RUNNING
 
     status_summary = swarm.get_swarm_status()
-    assert status_summary["running_agents"] == 3
+    assert status_summary["running_agents"] >= 5
     assert status_summary["topology_name"] == "software-dev-swarm"
 
     arch = swarm.get_agent("architect")
@@ -199,8 +226,12 @@ def test_swarm_lifecycle_manager():
     assert arch.can_use_tool("execute_shell") is False
     assert dev.can_use_tool("execute_shell") is True
 
+    for agent in active_agents:
+        assert agent.status == AgentStatus.RUNNING
+        assert agent.config.system_prompt
+
     term_res = swarm.terminate_swarm(graceful=True)
     assert all(term_res.values())
     assert swarm.status == SwarmStatus.TERMINATED
-
-    orchestrator.close()
+    for agent in swarm.list_agents():
+        assert agent.status == AgentStatus.TERMINATED

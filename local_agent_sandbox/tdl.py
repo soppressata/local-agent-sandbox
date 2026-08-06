@@ -1,57 +1,56 @@
 """
-Topology Definition Language (TDL) Parser & Swarm Agent Lifecycle Engine.
-Parses topology.yaml configurations to instantiate isolated agent instances with distinct
-system prompts, resource quotas, and tool permission boundaries, providing basic spin-up
-and graceful termination lifecycle management.
+Topology Definition Language (TDL) parser and basic agent lifecycle management.
+
+Parses topology.yaml configurations to instantiate isolated agent instances with
+distinct system prompts and tool permission boundaries, and provides spin-up and
+graceful termination lifecycle management.
 """
+
+from __future__ import annotations
 
 import os
 import time
 import uuid
-from enum import Enum
-from typing import Dict, List, Optional, Set, Any, Union
 from dataclasses import dataclass, field
-import yaml
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set, Union
 
-from .orchestrator import UniverseOrchestrator, Universe, UniverseStatus, ComputeQuota
-from .isolation import SecurityViolation
+import yaml
 
 
 class TDLParseError(ValueError):
     """Raised when TDL YAML content is malformed or invalid."""
-    pass
+
+
+class SecurityViolation(PermissionError):
+    """Raised when an agent attempts a tool it is not permitted to use."""
 
 
 @dataclass
 class ToolPermissions:
-    """
-    Tool permissions definition for an agent.
-    Controls tool execution rights with allowed/denied lists and wildcard support.
-    """
+    """Tool execution rights with allowed/denied lists and optional wildcards."""
+
     allowed_tools: List[str] = field(default_factory=list)
     denied_tools: List[str] = field(default_factory=list)
     default_allow: bool = False
 
     def is_tool_allowed(self, tool_name: str) -> bool:
         """
-        Checks whether execution of tool_name is permitted.
+        Return whether execution of ``tool_name`` is permitted.
 
         :param tool_name: Name of the tool to validate.
         :return: True if allowed, False if denied.
         """
         if tool_name in self.denied_tools or "*" in self.denied_tools:
             return False
-
         if "*" in self.allowed_tools or tool_name in self.allowed_tools:
             return True
-
         if not self.allowed_tools:
             return self.default_allow
-
         return False
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serializes permissions to a dictionary."""
+        """Serialize permissions to a dictionary."""
         return {
             "allowed_tools": list(self.allowed_tools),
             "denied_tools": list(self.denied_tools),
@@ -60,9 +59,7 @@ class ToolPermissions:
 
     @classmethod
     def from_dict(cls, data: Union[Dict[str, Any], List[str], None]) -> "ToolPermissions":
-        """
-        Parses ToolPermissions from a dict or list of allowed tools.
-        """
+        """Parse ToolPermissions from a dict or list of allowed tools."""
         if data is None:
             return cls()
         if isinstance(data, list):
@@ -84,10 +81,19 @@ class ToolPermissions:
 
 
 @dataclass
+class ComputeQuota:
+    """Optional resource quota for an agent instance."""
+
+    cpu_cores: float = 1.0
+    memory_mb: int = 512
+    max_threads: int = 16
+    max_processes: int = 8
+
+
+@dataclass
 class AgentConfig:
-    """
-    Configuration specification for a single agent instance within a TDL topology.
-    """
+    """Configuration for a single agent instance within a TDL topology."""
+
     name: str
     role: str = "agent"
     system_prompt: str = ""
@@ -98,12 +104,12 @@ class AgentConfig:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Converts AgentConfig to a dictionary representation."""
+        """Convert AgentConfig to a dictionary representation."""
         return {
             "name": self.name,
             "role": self.role,
             "system_prompt": self.system_prompt,
-            "tools": self.tools,
+            "tools": list(self.tools),
             "permissions": self.permissions.to_dict(),
             "quota": {
                 "cpu_cores": self.quota.cpu_cores,
@@ -111,16 +117,15 @@ class AgentConfig:
                 "max_threads": self.quota.max_threads,
                 "max_processes": self.quota.max_processes,
             },
-            "environment": self.environment,
-            "metadata": self.metadata,
+            "environment": dict(self.environment),
+            "metadata": dict(self.metadata),
         }
 
 
 @dataclass
 class TDLTopology:
-    """
-    Parsed Topology Definition Language structure for an agent swarm.
-    """
+    """Parsed Topology Definition Language structure for an agent swarm."""
+
     version: str = "1.0"
     name: str = "swarm-topology"
     description: str = ""
@@ -128,32 +133,30 @@ class TDLTopology:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def get_agent_config(self, name: str) -> Optional[AgentConfig]:
-        """Returns the AgentConfig with the given name if found."""
+        """Return the AgentConfig with the given name, or None."""
         for agent in self.agents:
             if agent.name == name:
                 return agent
         return None
 
     def to_dict(self) -> Dict[str, Any]:
-        """Converts topology to dictionary representation."""
+        """Convert topology to dictionary representation."""
         return {
             "version": self.version,
             "name": self.name,
             "description": self.description,
             "agents": [a.to_dict() for a in self.agents],
-            "metadata": self.metadata,
+            "metadata": dict(self.metadata),
         }
 
 
 class TDLParser:
-    """
-    Parser for Topology Definition Language (TDL) specifications in YAML or dictionary format.
-    """
+    """Parser for Topology Definition Language specifications (YAML or dict)."""
 
     @classmethod
     def parse_dict(cls, data: Dict[str, Any]) -> TDLTopology:
         """
-        Parses a dictionary into a TDLTopology instance.
+        Parse a dictionary into a TDLTopology instance.
 
         :param data: Dictionary containing TDL topology fields.
         :return: TDLTopology instance.
@@ -184,7 +187,9 @@ class TDLParser:
 
             agent_name = agent_data.get("name")
             if not agent_name:
-                raise TDLParseError(f"Agent entry at index {idx} missing required 'name' field.")
+                raise TDLParseError(
+                    f"Agent entry at index {idx} missing required 'name' field."
+                )
             agent_name = str(agent_name)
 
             if agent_name in seen_names:
@@ -193,9 +198,7 @@ class TDLParser:
 
             role = str(agent_data.get("role", "agent"))
             system_prompt = str(
-                agent_data.get("system_prompt")
-                or agent_data.get("prompt")
-                or ""
+                agent_data.get("system_prompt") or agent_data.get("prompt") or ""
             )
 
             tools_raw = agent_data.get("tools") or []
@@ -206,23 +209,25 @@ class TDLParser:
             else:
                 tools = []
 
-            # Permissions resolution
             perm_data = agent_data.get("permissions") or agent_data.get("tool_permissions")
             if perm_data is not None:
                 permissions = ToolPermissions.from_dict(perm_data)
             elif tools:
-                permissions = ToolPermissions(allowed_tools=tools, default_allow=False)
+                permissions = ToolPermissions(allowed_tools=list(tools), default_allow=False)
             else:
                 permissions = ToolPermissions(default_allow=True)
 
-            # Compute Quota resolution
             quota_data = agent_data.get("quota") or agent_data.get("resources") or {}
             quota = ComputeQuota()
             if isinstance(quota_data, dict):
                 if "cpu_cores" in quota_data or "cpus" in quota_data:
-                    quota.cpu_cores = float(quota_data.get("cpu_cores") or quota_data.get("cpus") or 1.0)
+                    quota.cpu_cores = float(
+                        quota_data.get("cpu_cores") or quota_data.get("cpus") or 1.0
+                    )
                 if "memory_mb" in quota_data or "memory" in quota_data:
-                    quota.memory_mb = int(quota_data.get("memory_mb") or quota_data.get("memory") or 512)
+                    quota.memory_mb = int(
+                        quota_data.get("memory_mb") or quota_data.get("memory") or 512
+                    )
                 if "max_threads" in quota_data:
                     quota.max_threads = int(quota_data["max_threads"])
                 if "max_processes" in quota_data:
@@ -261,7 +266,7 @@ class TDLParser:
     @classmethod
     def parse_yaml(cls, yaml_str: str) -> TDLTopology:
         """
-        Parses a YAML string into a TDLTopology instance.
+        Parse a YAML string into a TDLTopology instance.
 
         :param yaml_str: YAML formatted string.
         :return: TDLTopology instance.
@@ -280,7 +285,7 @@ class TDLParser:
     @classmethod
     def parse_file(cls, file_path: str) -> TDLTopology:
         """
-        Reads and parses a TDL topology file (YAML format).
+        Read and parse a TDL topology file (YAML format).
 
         :param file_path: Path to topology file (e.g., topology.yaml).
         :return: TDLTopology instance.
@@ -293,14 +298,16 @@ class TDLParser:
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
         except Exception as err:
-            raise TDLParseError(f"Failed to read topology file '{file_path}': {err}") from err
+            raise TDLParseError(
+                f"Failed to read topology file '{file_path}': {err}"
+            ) from err
 
         return cls.parse_yaml(content)
 
 
 def parse_tdl(content_or_dict: Union[str, Dict[str, Any]]) -> TDLTopology:
     """
-    Convenience function to parse TDL from a YAML string or dictionary.
+    Parse TDL from a YAML string or dictionary.
 
     :param content_or_dict: TDL content as YAML string or parsed dict.
     :return: TDLTopology instance.
@@ -312,7 +319,7 @@ def parse_tdl(content_or_dict: Union[str, Dict[str, Any]]) -> TDLTopology:
 
 def parse_tdl_file(file_path: str) -> TDLTopology:
     """
-    Convenience function to parse TDL from a file path.
+    Parse TDL from a file path.
 
     :param file_path: Path to topology YAML file.
     :return: TDLTopology instance.
@@ -321,6 +328,8 @@ def parse_tdl_file(file_path: str) -> TDLTopology:
 
 
 class AgentStatus(str, Enum):
+    """Lifecycle status of an agent instance."""
+
     CREATED = "CREATED"
     SPINNING_UP = "SPINNING_UP"
     RUNNING = "RUNNING"
@@ -331,35 +340,45 @@ class AgentStatus(str, Enum):
 
 class AgentInstance:
     """
-    An active runtime instance of an Agent specified by TDL.
-    Encapsulates its isolated Universe sandbox, system prompt, and tool execution boundaries.
+    Runtime instance of an agent specified by TDL.
+
+    Holds system prompt, tool permission boundaries, and a lightweight isolated
+    workspace used during the agent lifetime.
     """
 
-    def __init__(
-        self,
-        config: AgentConfig,
-        orchestrator: Optional[UniverseOrchestrator] = None,
-        agent_id: Optional[str] = None,
-    ):
+    def __init__(self, config: AgentConfig, agent_id: Optional[str] = None):
         self.agent_id = agent_id or f"agent-{config.name}-{uuid.uuid4().hex[:6]}"
         self.config = config
-        self.orchestrator = orchestrator or UniverseOrchestrator()
         self.status = AgentStatus.CREATED
-        self.universe: Optional[Universe] = None
         self.created_at = time.time()
         self.started_at: Optional[float] = None
         self.stopped_at: Optional[float] = None
         self.logs: List[str] = []
+        self._workspace: Dict[str, str] = {}
+        self._running = False
 
-    def log(self, message: str):
-        """Appends a timestamped log entry."""
-        entry = f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ')}] [Agent:{self.config.name}] {message}"
+    def log(self, message: str) -> None:
+        """Append a timestamped log entry."""
+        entry = (
+            f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}] "
+            f"[Agent:{self.config.name}] {message}"
+        )
         self.logs.append(entry)
+
+    def write_virtual_file(self, path: str, content: str) -> None:
+        """Write content into the agent isolated workspace."""
+        self._workspace[path] = content
+
+    def read_virtual_file(self, path: str) -> Optional[str]:
+        """Read content from the agent isolated workspace."""
+        return self._workspace.get(path)
 
     def spin_up(self) -> bool:
         """
-        Spins up the agent instance, initializing its isolated sandbox universe,
-        writing its system prompt, and starting process capabilities.
+        Spin up the agent instance.
+
+        Initializes isolated workspace state, stores the system prompt, and marks
+        the agent as running.
 
         :return: True if spin-up succeeded.
         """
@@ -367,38 +386,33 @@ class AgentInstance:
             return True
 
         self.status = AgentStatus.SPINNING_UP
-        self.log(f"Spinning up agent instance '{self.config.name}' (Role: {self.config.role})...")
+        self.log(
+            f"Spinning up agent instance '{self.config.name}' "
+            f"(Role: {self.config.role})..."
+        )
 
         try:
-            uv = self.orchestrator.create_universe(
-                name=f"sandbox-{self.config.name}",
-                quota=self.config.quota,
-                metadata={
-                    "agent_id": self.agent_id,
-                    "agent_name": self.config.name,
-                    "role": self.config.role,
-                    "tools": self.config.tools,
-                    "environment": self.config.environment,
-                },
-            )
-            self.universe = uv
-
-            # Store system prompt in sandbox virtual filesystem
+            self._workspace = {}
             if self.config.system_prompt:
-                uv.write_virtual_file("/etc/system_prompt.txt", self.config.system_prompt)
+                self.write_virtual_file("/etc/system_prompt.txt", self.config.system_prompt)
+            if self.config.environment:
+                env_blob = "\n".join(f"{k}={v}" for k, v in self.config.environment.items())
+                self.write_virtual_file("/etc/environment", env_blob)
 
+            self._running = True
             self.status = AgentStatus.RUNNING
             self.started_at = time.time()
-            self.log(f"Agent instance '{self.config.name}' active in sandbox Universe '{uv.id}'.")
+            self.log(f"Agent instance '{self.config.name}' is now RUNNING.")
             return True
         except Exception as err:
             self.status = AgentStatus.FAILED
+            self._running = False
             self.log(f"Spin-up failed for agent '{self.config.name}': {err}")
             raise
 
     def terminate(self, graceful: bool = True) -> bool:
         """
-        Gracefully terminates the agent instance and tears down its isolated sandbox.
+        Gracefully terminate the agent instance and clear its workspace.
 
         :param graceful: Whether to perform graceful cleanup.
         :return: True if termination succeeded.
@@ -407,13 +421,12 @@ class AgentInstance:
             return True
 
         self.status = AgentStatus.TERMINATING
-        self.log(f"Terminating agent instance '{self.config.name}' (graceful={graceful})...")
+        self.log(
+            f"Terminating agent instance '{self.config.name}' (graceful={graceful})..."
+        )
 
-        if self.universe:
-            self.orchestrator.stop_universe(self.universe.id)
-            self.orchestrator.destroy_universe(self.universe.id)
-            self.universe = None
-
+        self._workspace.clear()
+        self._running = False
         self.status = AgentStatus.TERMINATED
         self.stopped_at = time.time()
         self.log(f"Agent instance '{self.config.name}' terminated successfully.")
@@ -421,29 +434,35 @@ class AgentInstance:
 
     def can_use_tool(self, tool_name: str) -> bool:
         """
-        Checks whether this agent instance is permitted to execute tool_name.
+        Return whether this agent instance may execute ``tool_name``.
 
         :param tool_name: Name of the tool to query.
         :return: True if allowed.
         """
         return self.config.permissions.is_tool_allowed(tool_name)
 
-    def execute_tool(self, tool_name: str, **kwargs) -> Any:
+    def execute_tool(self, tool_name: str, **kwargs: Any) -> Any:
         """
-        Validates permission and simulates execution of a tool within the agent's sandbox boundary.
+        Validate permission and simulate tool execution within the agent boundary.
 
         :param tool_name: Name of tool to execute.
         :return: Execution summary dictionary.
         :raises SecurityViolation: If tool execution is denied by permissions.
         """
         if not self.can_use_tool(tool_name):
-            self.log(f"SECURITY VIOLATION: Tool '{tool_name}' execution denied for agent '{self.config.name}'.")
+            self.log(
+                f"SECURITY VIOLATION: Tool '{tool_name}' execution denied for "
+                f"agent '{self.config.name}'."
+            )
             raise SecurityViolation(
                 f"Agent '{self.config.name}' lacks permission to execute tool '{tool_name}'."
             )
 
         if self.status != AgentStatus.RUNNING:
-            raise RuntimeError(f"Cannot execute tool on agent '{self.config.name}' with status '{self.status.value}'.")
+            raise RuntimeError(
+                f"Cannot execute tool on agent '{self.config.name}' "
+                f"with status '{self.status.value}'."
+            )
 
         self.log(f"Executing tool '{tool_name}' with args {kwargs}")
         return {
@@ -455,22 +474,27 @@ class AgentInstance:
         }
 
     def get_status(self) -> Dict[str, Any]:
-        """Returns detailed status information for the agent instance."""
+        """Return detailed status information for the agent instance."""
+        uptime = 0.0
+        if self.started_at and not self.stopped_at:
+            uptime = round(time.time() - self.started_at, 2)
         return {
             "agent_id": self.agent_id,
             "name": self.config.name,
             "role": self.config.role,
             "status": self.status.value,
             "system_prompt": self.config.system_prompt,
-            "tools": self.config.tools,
+            "tools": list(self.config.tools),
             "permissions": self.config.permissions.to_dict(),
-            "universe_id": self.universe.id if self.universe else None,
-            "uptime_seconds": round(time.time() - self.started_at, 2) if self.started_at and not self.stopped_at else 0.0,
+            "running": self._running,
+            "uptime_seconds": uptime,
             "logs_count": len(self.logs),
         }
 
 
 class SwarmStatus(str, Enum):
+    """Lifecycle status of a multi-agent swarm."""
+
     CREATED = "CREATED"
     RUNNING = "RUNNING"
     PARTIAL = "PARTIAL"
@@ -479,34 +503,30 @@ class SwarmStatus(str, Enum):
 
 class SwarmLifecycleManager:
     """
-    Lifecycle orchestrator for multi-agent swarms defined via TDL.
-    Manages collective spin-up, monitoring, and graceful teardown of agent topologys.
+    Lifecycle manager for multi-agent swarms defined via TDL.
+
+    Handles collective spin-up and graceful teardown of agent instances.
     """
 
-    def __init__(
-        self,
-        topology: TDLTopology,
-        orchestrator: Optional[UniverseOrchestrator] = None,
-    ):
+    def __init__(self, topology: TDLTopology):
         self.topology = topology
-        self.orchestrator = orchestrator or UniverseOrchestrator()
         self.agents: Dict[str, AgentInstance] = {}
         self.status = SwarmStatus.CREATED
 
         for agent_cfg in topology.agents:
-            instance = AgentInstance(config=agent_cfg, orchestrator=self.orchestrator)
+            instance = AgentInstance(config=agent_cfg)
             self.agents[agent_cfg.name] = instance
 
     def spin_up_swarm(self) -> List[AgentInstance]:
         """
-        Spins up all agent instances defined in the TDL topology.
+        Spin up all agent instances defined in the TDL topology.
 
-        :return: List of active AgentInstance objects.
+        :return: List of successfully started AgentInstance objects.
         """
         spun_up: List[AgentInstance] = []
         failures = 0
 
-        for name, agent in self.agents.items():
+        for agent in self.agents.values():
             try:
                 if agent.spin_up():
                     spun_up.append(agent)
@@ -524,9 +544,9 @@ class SwarmLifecycleManager:
 
     def terminate_swarm(self, graceful: bool = True) -> Dict[str, bool]:
         """
-        Gracefully terminates all running agent instances in the swarm topology.
+        Gracefully terminate all agent instances in the swarm.
 
-        :param graceful: Whether to shutdown gracefully.
+        :param graceful: Whether to shut down gracefully.
         :return: Dict mapping agent names to termination success status.
         """
         results: Dict[str, bool] = {}
@@ -537,7 +557,7 @@ class SwarmLifecycleManager:
         return results
 
     def get_agent(self, name_or_id: str) -> Optional[AgentInstance]:
-        """Returns an agent instance by name or agent_id."""
+        """Return an agent instance by name or agent_id."""
         if name_or_id in self.agents:
             return self.agents[name_or_id]
         for agent in self.agents.values():
@@ -546,13 +566,15 @@ class SwarmLifecycleManager:
         return None
 
     def list_agents(self) -> List[AgentInstance]:
-        """Returns a list of all agent instances in the swarm."""
+        """Return a list of all agent instances in the swarm."""
         return list(self.agents.values())
 
     def get_swarm_status(self) -> Dict[str, Any]:
-        """Returns a dictionary summary of overall swarm health and state."""
+        """Return a summary of overall swarm health and state."""
         agent_statuses = [a.get_status() for a in self.agents.values()]
-        running_count = sum(1 for a in self.agents.values() if a.status == AgentStatus.RUNNING)
+        running_count = sum(
+            1 for a in self.agents.values() if a.status == AgentStatus.RUNNING
+        )
         return {
             "topology_name": self.topology.name,
             "version": self.topology.version,
