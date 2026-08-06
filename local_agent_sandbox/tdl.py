@@ -15,6 +15,7 @@ import yaml
 
 from .orchestrator import UniverseOrchestrator, Universe, UniverseStatus, ComputeQuota
 from .isolation import SecurityViolation
+from .messaging import Message, MessageBus, VirtualInbox
 
 
 class TDLParseError(ValueError):
@@ -340,6 +341,7 @@ class AgentInstance:
         config: AgentConfig,
         orchestrator: Optional[UniverseOrchestrator] = None,
         agent_id: Optional[str] = None,
+        message_bus: Optional[MessageBus] = None,
     ):
         self.agent_id = agent_id or f"agent-{config.name}-{uuid.uuid4().hex[:6]}"
         self.config = config
@@ -350,6 +352,8 @@ class AgentInstance:
         self.started_at: Optional[float] = None
         self.stopped_at: Optional[float] = None
         self.logs: List[str] = []
+        self.message_bus = message_bus or MessageBus()
+        self.inbox: Optional[VirtualInbox] = None
 
     def log(self, message: str):
         """Appends a timestamped log entry."""
@@ -388,6 +392,7 @@ class AgentInstance:
                 uv.write_virtual_file("/etc/system_prompt.txt", self.config.system_prompt)
 
             self.status = AgentStatus.RUNNING
+            self.inbox = self.message_bus.register_inbox(self.config.name)
             self.started_at = time.time()
             self.log(f"Agent instance '{self.config.name}' active in sandbox Universe '{uv.id}'.")
             return True
@@ -413,6 +418,8 @@ class AgentInstance:
             self.orchestrator.stop_universe(self.universe.id)
             self.orchestrator.destroy_universe(self.universe.id)
             self.universe = None
+        self.message_bus.deregister_inbox(self.config.name)
+        self.inbox = None
 
         self.status = AgentStatus.TERMINATED
         self.stopped_at = time.time()
@@ -454,6 +461,28 @@ class AgentInstance:
             "timestamp": time.time(),
         }
 
+    def send_message(self, recipient: str, body: Any, metadata: Optional[Dict[str, Any]] = None) -> Message:
+        """Send a direct message from this agent."""
+        return self.message_bus.send(self.config.name, recipient, body, metadata)
+
+    def receive_messages(self, limit: Optional[int] = None, mark_read: bool = False) -> List[Message]:
+        """Read messages from this agent's inbox in strict delivery order."""
+        if self.inbox is None:
+            return []
+        messages = self.inbox.poll(limit=limit)
+        if mark_read:
+            for message in messages:
+                self.inbox.mark_read(message.message_id)
+        return messages
+
+    def broadcast_message(self, body: Any, metadata: Optional[Dict[str, Any]] = None) -> List[Message]:
+        """Broadcast a message from this agent to the other active agents."""
+        return self.message_bus.broadcast(self.config.name, body, metadata)
+
+    def unread_message_count(self) -> int:
+        """Return the number of unread messages for this agent."""
+        return self.inbox.unread_count if self.inbox else 0
+
     def get_status(self) -> Dict[str, Any]:
         """Returns detailed status information for the agent instance."""
         return {
@@ -487,14 +516,16 @@ class SwarmLifecycleManager:
         self,
         topology: TDLTopology,
         orchestrator: Optional[UniverseOrchestrator] = None,
+        message_bus: Optional[MessageBus] = None,
     ):
         self.topology = topology
         self.orchestrator = orchestrator or UniverseOrchestrator()
+        self.message_bus = message_bus or MessageBus()
         self.agents: Dict[str, AgentInstance] = {}
         self.status = SwarmStatus.CREATED
 
         for agent_cfg in topology.agents:
-            instance = AgentInstance(config=agent_cfg, orchestrator=self.orchestrator)
+            instance = AgentInstance(config=agent_cfg, orchestrator=self.orchestrator, message_bus=self.message_bus)
             self.agents[agent_cfg.name] = instance
 
     def spin_up_swarm(self) -> List[AgentInstance]:
@@ -561,3 +592,17 @@ class SwarmLifecycleManager:
             "running_agents": running_count,
             "agents": agent_statuses,
         }
+
+    def send_message(self, sender: str, recipient: str, body: Any,
+                     metadata: Optional[Dict[str, Any]] = None) -> Message:
+        """Send a direct message between agents in this swarm."""
+        return self.message_bus.send(sender, recipient, body, metadata)
+
+    def broadcast_message(self, sender: str, body: Any,
+                          metadata: Optional[Dict[str, Any]] = None) -> List[Message]:
+        """Broadcast a message to all other active agents in this swarm."""
+        return self.message_bus.broadcast(sender, body, metadata)
+
+    def get_inbox(self, owner: str) -> Optional[VirtualInbox]:
+        """Return the virtual inbox for a swarm agent."""
+        return self.message_bus.get_inbox(owner)

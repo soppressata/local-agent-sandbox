@@ -20,6 +20,10 @@ from local_agent_sandbox.tdl import (
     parse_tdl,
     parse_tdl_file,
 )
+from local_agent_sandbox.messaging import (
+    MessageBus, VirtualInbox, Message, MessageKind, InboxNotFoundError,
+    InboxOverflowError,
+)
 
 __all__ = [
     "LocalAgentSandbox",
@@ -37,4 +41,10 @@ __all__ = [
     "TDLParseError",
     "parse_tdl",
     "parse_tdl_file",
+    "MessageBus",
+    "VirtualInbox",
+    "Message",
+    "MessageKind",
+    "InboxNotFoundError",
+    "InboxOverflowError",
 ]
