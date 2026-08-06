@@ -1,5 +1,5 @@
 import os
-import pytest
+import tempfile
 import getpass
 from local_agent_sandbox import LocalAgentSandbox, SandboxConfig, PolicyMemoryEngine
 
@@ -16,7 +16,6 @@ def test_basic_command_execution():
 
 def test_dangerous_command_blocking():
     sandbox = LocalAgentSandbox()
-    # Test standard pattern
     res = sandbox.execute("rm -rf /")
     assert res.blocked is True
     assert res.exit_code == 126
@@ -42,15 +41,16 @@ def test_policy_memory_engine():
 
 
 def test_isolate_filesystem_flag_behavior():
-    # When isolate_filesystem is True, the process runs in a user namespace as 'nobody'
     config_isolated = SandboxConfig(isolate_filesystem=True)
     sandbox_isolated = LocalAgentSandbox(config=config_isolated)
-    res_isolated = sandbox_isolated.execute("whoami")
-    assert res_isolated.exit_code == 0
-    assert "nobody" in res_isolated.stdout.strip()
+    res_uid = sandbox_isolated.execute("id -u")
+    res_gid = sandbox_isolated.execute("id -g")
+    assert res_uid.exit_code == 0, res_uid.stderr
+    assert res_gid.exit_code == 0, res_gid.stderr
+    assert res_uid.stdout.strip() == "65534"
+    assert res_gid.stdout.strip() == "65534"
     sandbox_isolated.cleanup()
 
-    # When isolate_filesystem is False, it runs as the host user
     config_host = SandboxConfig(isolate_filesystem=False)
     sandbox_host = LocalAgentSandbox(config=config_host)
     res_host = sandbox_host.execute("whoami")
@@ -61,32 +61,28 @@ def test_isolate_filesystem_flag_behavior():
 
 
 def test_resource_limits_enforcement():
-    # We can test timeout limit and file size limit
-    # The default file size limit in core.py is 100MB, but let's test if we can run within limits
-    # and if we trigger timeout
     config = SandboxConfig(max_timeout_seconds=1.0)
     sandbox = LocalAgentSandbox(config=config)
-    
-    # Writing a small file should succeed
+
     res = sandbox.execute("echo 'small content' > small.txt && cat small.txt")
-    assert res.exit_code == 0
+    assert res.exit_code == 0, res.stderr
     assert "small content" in res.stdout
-    
-    # Try writing a file larger than 100MB limit (or check limit triggering via dd)
-    # The file size limit is 100MB, writing 110MB should trigger File size limit exceeded
-    # 110 * 1024 * 1024 / 1024 / 1024 = 110
+
     res_large = sandbox.execute("dd if=/dev/zero of=large.bin bs=1M count=110")
-    # It should be terminated by signal 25 (SIGXFSZ) or fail
     assert res_large.exit_code != 0
-    assert "File size limit exceeded" in res_large.stderr or res_large.exit_code in [-25, 153, 254]
-    
+    err = res_large.stderr.lower()
+    assert (
+        "file size limit exceeded" in err
+        or "file too large" in err
+        or res_large.exit_code in [-25, 153, 254]
+    )
+
     sandbox.cleanup()
 
 
 def test_robust_guardrails_blocked_bypasses():
     sandbox = LocalAgentSandbox()
-    
-    # Guardrail bypasses that must be blocked
+
     bypasses = [
         "rm -rf /*",
         "rm -fr /",
@@ -105,11 +101,70 @@ def test_robust_guardrails_blocked_bypasses():
         ":(){ :|:& };:",
         " : ( ) { : | : & } ; : "
     ]
-    
+
     for cmd in bypasses:
         res = sandbox.execute(cmd)
         assert res.blocked is True
         assert res.exit_code == 126
         assert "Forbidden dangerous command" in res.stderr
-        
+
     sandbox.cleanup()
+
+
+def test_isolation_blocks_host_file_writes():
+    fd, host_path = tempfile.mkstemp(prefix="las_host_probe_")
+    os.close(fd)
+    original = b"untouched-host-content\n"
+    with open(host_path, "wb") as f:
+        f.write(original)
+
+    sandbox = LocalAgentSandbox(config=SandboxConfig(isolate_filesystem=True))
+    try:
+        res = sandbox.execute(f"echo pwned > {host_path}")
+        assert res.blocked is False, res.stderr
+        with open(host_path, "rb") as f:
+            assert f.read() == original
+    finally:
+        sandbox.cleanup()
+        os.unlink(host_path)
+
+
+def test_isolation_drops_to_nobody():
+    sandbox = LocalAgentSandbox(config=SandboxConfig(isolate_filesystem=True))
+    try:
+        res_u = sandbox.execute("id -u")
+        res_g = sandbox.execute("id -g")
+        assert res_u.exit_code == 0, res_u.stderr
+        assert res_g.exit_code == 0, res_g.stderr
+        assert res_u.stdout.strip() == "65534"
+        assert res_g.stdout.strip() == "65534"
+    finally:
+        sandbox.cleanup()
+
+
+def test_isolation_hides_host_paths():
+    sandbox = LocalAgentSandbox(config=SandboxConfig(isolate_filesystem=True))
+    try:
+        res_shadow = sandbox.execute("cat /etc/shadow")
+        assert res_shadow.exit_code != 0
+        assert res_shadow.blocked is False
+        combined = (res_shadow.stdout + res_shadow.stderr).lower()
+        assert "no such file" in combined or "not found" in combined or "cannot open" in combined
+
+        res_os = sandbox.execute("cat /etc/os-release")
+        assert res_os.exit_code != 0
+        combined_os = (res_os.stdout + res_os.stderr).lower()
+        assert "no such file" in combined_os or "not found" in combined_os or "cannot open" in combined_os
+    finally:
+        sandbox.cleanup()
+
+
+def test_workspace_is_writable_inside_jail():
+    sandbox = LocalAgentSandbox(config=SandboxConfig(isolate_filesystem=True))
+    try:
+        res = sandbox.execute("echo hello > out.txt && cat out.txt && id -u")
+        assert res.exit_code == 0, res.stderr
+        assert "hello" in res.stdout
+        assert "65534" in res.stdout
+    finally:
+        sandbox.cleanup()
