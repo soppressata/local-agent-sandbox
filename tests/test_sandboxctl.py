@@ -11,6 +11,18 @@ from click.testing import CliRunner
 from local_agent_sandbox.cli import sandboxctl
 from local_agent_sandbox.receipt import ReceiptStore, load_public_key, verify_receipt
 
+
+def _make_runner() -> CliRunner:
+    """Return a CliRunner that captures stdout and stderr separately.
+
+    click>=8.2 always separates the streams; click 8.1 mixes them unless
+    ``mix_stderr`` is set explicitly (the parameter was removed in 8.2).
+    """
+    try:
+        return CliRunner(mix_stderr=False)
+    except TypeError:  # click>=8.2 removed the mix_stderr parameter
+        return CliRunner()
+
 GOOD_TRUSTFILE = """
 version: "1"
 name: "hello"
@@ -36,7 +48,7 @@ expiry: "2000-01-01T00:00:00Z"
 def _invoke(tmp_path, *opts, trustfile_text=GOOD_TRUSTFILE):
     trustfile = tmp_path / "trustfile.yaml"
     trustfile.write_text(trustfile_text, encoding="utf-8")
-    runner = CliRunner()
+    runner = _make_runner()
     return runner.invoke(
         sandboxctl,
         ["run", str(trustfile), "echo hello", *opts],
@@ -96,14 +108,14 @@ def test_run_with_expired_profile_fails_closed(tmp_path):
 def test_run_invalid_trustfile_exits_two(tmp_path):
     trustfile = tmp_path / "bad.yaml"
     trustfile.write_text('version: "1"\nname: 12345\n', encoding="utf-8")
-    runner = CliRunner()
+    runner = _make_runner()
     result = runner.invoke(sandboxctl, ["run", str(trustfile), "echo hi"])
     assert result.exit_code == 2
     assert "Invalid trustfile" in result.stderr
 
 
 def test_run_rejects_missing_trustfile(tmp_path):
-    runner = CliRunner()
+    runner = _make_runner()
     result = runner.invoke(sandboxctl, ["run", str(tmp_path / "nope.yaml"), "echo hi"])
     assert result.exit_code == 2
 
@@ -113,14 +125,14 @@ def test_logs_round_trips_receipt(tmp_path):
     result = _invoke(tmp_path, "--receipt-dir", str(store_dir))
     receipt_id = json.loads(result.stdout)["receipt"]["id"]
 
-    runner = CliRunner()
+    runner = _make_runner()
     logs = runner.invoke(sandboxctl, ["logs", receipt_id, "--receipt-dir", str(store_dir)])
     assert logs.exit_code == 0
     assert json.loads(logs.stdout)["receipt"]["id"] == receipt_id
 
 
 def test_logs_unknown_id_fails(tmp_path):
-    runner = CliRunner()
+    runner = _make_runner()
     result = runner.invoke(
         sandboxctl, ["logs", "does-not-exist", "--receipt-dir", str(tmp_path / "store")]
     )
@@ -132,7 +144,7 @@ def test_query_filters_store(tmp_path):
     store_dir = tmp_path / "store"
     _invoke(tmp_path, "--receipt-dir", str(store_dir))
 
-    runner = CliRunner()
+    runner = _make_runner()
     result = runner.invoke(
         sandboxctl, ["query", "fully_enforced=true", "--receipt-dir", str(store_dir)]
     )
@@ -142,7 +154,7 @@ def test_query_filters_store(tmp_path):
 
 
 def test_query_syntax_error_exits_two(tmp_path):
-    runner = CliRunner()
+    runner = _make_runner()
     result = runner.invoke(
         sandboxctl, ["query", "exit_code=", "--receipt-dir", str(tmp_path / "store")]
     )
@@ -159,7 +171,7 @@ def test_sbom_export_with_verification(tmp_path):
     )
     receipt_id = json.loads(result.stdout)["receipt"]["id"]
 
-    runner = CliRunner()
+    runner = _make_runner()
     sbom = runner.invoke(
         sandboxctl,
         [
@@ -179,7 +191,7 @@ def test_sbom_export_with_verification(tmp_path):
 
 
 def test_sandboxctl_status_cmd():
-    runner = CliRunner()
+    runner = _make_runner()
     result = runner.invoke(sandboxctl, ["status"])
     assert result.exit_code == 0
     assert "Kernel Syscall Violations:" in result.output
