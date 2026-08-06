@@ -32,11 +32,20 @@ memory = ["rmbr>=0.2.0"]
 [project.scripts]
 agent-sandbox = "local_agent_sandbox.cli:cli"
 sandboxctl = "local_agent_sandbox.cli:sandboxctl"
+lasb = "local_agent_sandbox.cli:main"
+harness = "local_agent_sandbox.cli:main"
+openharness = "local_agent_sandbox.cli:main"
 
 [tool.pytest.ini_options]
 minversion = "7.0"
 addopts = "-ra -q --cov=local_agent_sandbox"
 testpaths = ["tests"]
+filterwarnings = [
+    "ignore::pytest.PytestCollectionWarning",
+    "ignore::DeprecationWarning",
+    "ignore:.*regex.*:DeprecationWarning",
+    "ignore:.*FastAPI.*:DeprecationWarning"
+]
 
 [tool.setuptools.packages.find]
 include = ["local_agent_sandbox*"]
@@ -66,23 +75,30 @@ requires-python = ">=3.9"
 dependencies = [
     "pydantic>=2.0.0",
     "click>=8.0.0",
-    "pyyaml>=6.0"
+    "pyyaml>=6.0",
+    "cryptography>=42.0.0"
 ]
 
 [project.optional-dependencies]
 memory = ["rmbr>=0.2.0"]
 
 [project.scripts]
+agent-sandbox = "local_agent_sandbox.cli:cli"
+sandboxctl = "local_agent_sandbox.cli:sandboxctl"
 lasb = "local_agent_sandbox.cli:main"
-sandboxctl = "local_agent_sandbox.cli:main"
-agent-sandbox = "local_agent_sandbox.cli:main"
 harness = "local_agent_sandbox.cli:main"
 openharness = "local_agent_sandbox.cli:main"
 
 [tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --cov=local_agent_sandbox"
+testpaths = ["tests"]
 filterwarnings = [
     "ignore::pytest.PytestCollectionWarning",
     "ignore::DeprecationWarning",
     "ignore:.*regex.*:DeprecationWarning",
     "ignore:.*FastAPI.*:DeprecationWarning"
 ]
+
+[tool.setuptools.packages.find]
+include = ["local_agent_sandbox*"]

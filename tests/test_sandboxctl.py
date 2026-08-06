@@ -176,3 +176,20 @@ def test_sbom_export_with_verification(tmp_path):
         p for p in doc["properties"] if p["name"] == "sandboxctl:signature_valid"
     )
     assert prop["value"] == "true"
+
+
+def test_sandboxctl_status_cmd():
+    runner = CliRunner()
+    result = runner.invoke(sandboxctl, ["status"])
+    assert result.exit_code == 0
+    assert "Kernel Syscall Violations:" in result.output
+
+    result_json = runner.invoke(sandboxctl, ["status", "--json"])
+    assert result_json.exit_code == 0
+    data = json.loads(result_json.output)
+    assert "kernel_violations" in data
+
+    result_reset = runner.invoke(sandboxctl, ["status", "--reset"])
+    assert result_reset.exit_code == 0
+    assert "reset to zero" in result_reset.output
+
