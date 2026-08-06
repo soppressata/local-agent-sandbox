@@ -214,3 +214,42 @@ def test_swarm_lifecycle_manager():
     assert swarm.status == SwarmStatus.TERMINATED
 
     orchestrator.close()
+
+
+def test_agent_universe_isolation():
+    """Each agent instance must be isolated in its own Universe filesystem."""
+    orchestrator = UniverseOrchestrator()
+
+    agent_a = AgentInstance(
+        config=AgentConfig(
+            name="writer",
+            system_prompt="Writer agent.",
+            permissions=ToolPermissions(allowed_tools=["*"]),
+        ),
+        orchestrator=orchestrator,
+    )
+    agent_b = AgentInstance(
+        config=AgentConfig(
+            name="reader",
+            system_prompt="Reader agent.",
+            permissions=ToolPermissions(allowed_tools=["*"]),
+        ),
+        orchestrator=orchestrator,
+    )
+
+    assert agent_a.spin_up() is True
+    assert agent_b.spin_up() is True
+
+    # Write a secret file into agent_a's universe
+    agent_a.universe.write_virtual_file("/workspace/secret.txt", "agent-a-secret")
+
+    # Verify agent_b cannot read agent_a's file
+    with pytest.raises(FileNotFoundError):
+        agent_b.universe.read_virtual_file("/workspace/secret.txt")
+
+    # Verify agent_a can still read its own file
+    assert agent_a.universe.read_virtual_file("/workspace/secret.txt") == "agent-a-secret"
+
+    assert agent_a.terminate() is True
+    assert agent_b.terminate() is True
+    orchestrator.close()
