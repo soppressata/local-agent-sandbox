@@ -139,14 +139,18 @@ class VirtualInbox:
 class MessageBus:
     """Low-latency local bus with atomic global delivery ordering."""
 
-    def __init__(self, default_capacity: int = 1000) -> None:
+    def __init__(self, default_capacity: int = 1000, history_size: int = 200) -> None:
+        if history_size < 1:
+            raise ValueError("history_size must be positive")
         self.default_capacity = default_capacity
+        self.history_size = history_size
         self._inboxes: Dict[str, VirtualInbox] = {}
         self._lock = threading.RLock()
         self._sequence = 0
         self._messages_sent = 0
         self._broadcasts_sent = 0
         self._broadcast_deliveries = 0
+        self._history: Deque[Message] = deque(maxlen=history_size)
 
     def register_inbox(self, owner: str, capacity: Optional[int] = None) -> VirtualInbox:
         """Register and return an agent's inbox."""
@@ -180,6 +184,7 @@ class MessageBus:
             message = Message(sender, recipient, body, kind, priority=priority, sequence=self._sequence,
                               metadata=dict(metadata or {}))
             inbox._put(message)
+            self._history.append(message)
             self._messages_sent += 1
             return message
 
@@ -206,6 +211,17 @@ class MessageBus:
                     "broadcasts_sent": self._broadcasts_sent,
                     "broadcast_deliveries": self._broadcast_deliveries}
 
+    def history(self, limit: Optional[int] = None) -> List[Message]:
+        """Return the most recently sent messages, oldest first.
+
+        The history is a bounded ring buffer of size ``history_size``.
+        """
+        if limit is not None and limit < 0:
+            raise ValueError("limit must not be negative")
+        with self._lock:
+            messages = list(self._history)
+        return messages if limit is None else messages[-limit:]
+
     def reset(self) -> None:
         """Clear counters and all queued messages while retaining inboxes."""
         with self._lock:
@@ -213,3 +229,4 @@ class MessageBus:
                 inbox._messages.clear()
                 inbox._read.clear()
             self._sequence = self._messages_sent = self._broadcasts_sent = self._broadcast_deliveries = 0
+            self._history.clear()

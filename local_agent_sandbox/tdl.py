@@ -6,6 +6,7 @@ and graceful termination lifecycle management.
 """
 
 import os
+import threading
 import time
 import uuid
 from enum import Enum
@@ -357,6 +358,11 @@ class AgentInstance:
         self.message_bus = message_bus or MessageBus()
         self.inbox: Optional[VirtualInbox] = None
         self.shared_context = shared_context or SharedContext()
+        self.parent: Optional["AgentInstance"] = None
+        self.parent_id: Optional[str] = None
+        self.swarm_manager: Optional["SwarmLifecycleManager"] = None
+        self._children: Dict[str, "AgentInstance"] = {}
+        self._children_lock = threading.RLock()
 
     def log(self, message: str):
         """Appends a timestamped log entry."""
@@ -404,11 +410,12 @@ class AgentInstance:
             self.log(f"Spin-up failed for agent '{self.config.name}': {err}")
             raise
 
-    def terminate(self, graceful: bool = True) -> bool:
+    def terminate(self, graceful: bool = True, recursive: bool = True) -> bool:
         """
         Gracefully terminates the agent instance and tears down its isolated sandbox.
 
         :param graceful: Whether to perform graceful cleanup.
+        :param recursive: Whether to also terminate all spawned sub-agents first.
         :return: True if termination succeeded.
         """
         if self.status in (AgentStatus.TERMINATED, AgentStatus.FAILED):
@@ -416,6 +423,10 @@ class AgentInstance:
 
         self.status = AgentStatus.TERMINATING
         self.log(f"Terminating agent instance '{self.config.name}' (graceful={graceful})...")
+
+        if recursive:
+            for child in self.get_subagents():
+                self.terminate_subagent(child.config.name, graceful=graceful)
 
         if self.universe:
             self.orchestrator.stop_universe(self.universe.id)
@@ -525,7 +536,93 @@ class AgentInstance:
             "universe_id": self.universe.id if self.universe else None,
             "uptime_seconds": round(time.time() - self.started_at, 2) if self.started_at and not self.stopped_at else 0.0,
             "logs_count": len(self.logs),
+            "parent_id": self.parent_id,
+            "subagent_count": len(self.get_subagents()),
         }
+
+    def spawn_subagent(
+        self,
+        config: AgentConfig,
+        spin_up: bool = True,
+        agent_id: Optional[str] = None,
+    ) -> "AgentInstance":
+        """
+        Dynamically spawn a child sub-agent under this running agent.
+
+        The child inherits this agent's orchestrator, message bus, and shared
+        context so it can communicate and cooperate with the rest of the swarm.
+        When this agent belongs to a :class:`SwarmLifecycleManager`, the spawned
+        sub-agent is registered with the swarm for monitoring and bulk teardown.
+
+        :param config: Configuration for the sub-agent to spawn.
+        :param spin_up: Whether to immediately spin the sub-agent up.
+        :param agent_id: Optional explicit agent id for the sub-agent.
+        :return: The newly spawned :class:`AgentInstance`.
+        :raises RuntimeError: If this agent is not currently RUNNING.
+        :raises ValueError: If a sub-agent with the same name already exists
+            beneath this agent, or the name is already tracked by the swarm.
+        """
+        if self.status != AgentStatus.RUNNING:
+            raise RuntimeError(
+                f"Cannot spawn sub-agent from agent '{self.config.name}' "
+                f"with status '{self.status.value}'."
+            )
+
+        child = AgentInstance(
+            config=config,
+            orchestrator=self.orchestrator,
+            agent_id=agent_id,
+            message_bus=self.message_bus,
+            shared_context=self.shared_context,
+        )
+        child.parent = self
+        child.parent_id = self.agent_id
+        with self._children_lock:
+            if config.name in self._children:
+                raise ValueError(
+                    f"Sub-agent '{config.name}' already exists under agent "
+                    f"'{self.config.name}'."
+                )
+            self._children[config.name] = child
+        if self.swarm_manager is not None:
+            self.swarm_manager.register_agent(child)
+        self.log(f"Spawned sub-agent '{config.name}' (agent_id={child.agent_id}).")
+        if spin_up:
+            child.spin_up()
+        return child
+
+    def get_subagents(self) -> List["AgentInstance"]:
+        """Return the sub-agents currently spawned directly under this agent."""
+        with self._children_lock:
+            return list(self._children.values())
+
+    def get_child(self, name: str) -> Optional["AgentInstance"]:
+        """Return a directly spawned sub-agent by name, or ``None`` when absent."""
+        with self._children_lock:
+            return self._children.get(name)
+
+    def terminate_subagent(self, name: str, graceful: bool = True) -> bool:
+        """
+        Terminate and remove a directly spawned sub-agent by name.
+
+        :param name: Name of the sub-agent to terminate.
+        :param graceful: Whether to perform graceful cleanup.
+        :return: True if the sub-agent existed and was terminated.
+        """
+        with self._children_lock:
+            child = self._children.pop(name, None)
+        if child is None:
+            return False
+        child.terminate(graceful=graceful, recursive=True)
+        return True
+
+    def get_descendants(self) -> List["AgentInstance"]:
+        """Return every transitive sub-agent beneath this agent, depth-first."""
+        descendants: List["AgentInstance"] = []
+        for child in self.get_subagents():
+            descendants.append(child)
+            descendants.extend(child.get_descendants())
+        return descendants
 
 
 class SwarmStatus(str, Enum):
@@ -562,7 +659,22 @@ class SwarmLifecycleManager:
                 message_bus=self.message_bus,
                 shared_context=self.shared_context,
             )
+            instance.swarm_manager = self
             self.agents[agent_cfg.name] = instance
+
+    def register_agent(self, agent: AgentInstance) -> None:
+        """
+        Register a dynamically spawned agent with this swarm for monitoring.
+
+        :param agent: The spawned :class:`AgentInstance` to register.
+        :raises ValueError: If an agent with the same name is already tracked.
+        """
+        if agent.config.name in self.agents:
+            raise ValueError(
+                f"Agent '{agent.config.name}' is already registered in this swarm."
+            )
+        agent.swarm_manager = self
+        self.agents[agent.config.name] = agent
 
     def spin_up_swarm(self) -> List[AgentInstance]:
         """

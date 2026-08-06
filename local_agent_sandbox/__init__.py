@@ -28,6 +28,12 @@ from local_agent_sandbox.shared_context import (
     SharedContext, SharedStateStore, SharedVectorStore, StateEntry,
     VectorEntry, SearchResult,
 )
+from local_agent_sandbox.observability import (
+    build_topology,
+    build_snapshot,
+    render_dashboard,
+    monitor,
+)
 
 __all__ = [
     "LocalAgentSandbox",
@@ -57,4 +63,8 @@ __all__ = [
     "StateEntry",
     "VectorEntry",
     "SearchResult",
+    "build_topology",
+    "build_snapshot",
+    "render_dashboard",
+    "monitor",
 ]
