@@ -19,6 +19,8 @@ from local_agent_sandbox.tdl import (
     parse_tdl,
     parse_tdl_file,
 )
+from local_agent_sandbox.isolation import SecurityViolation
+from local_agent_sandbox.orchestrator import UniverseOrchestrator
 
 
 SAMPLE_TDL_YAML = """
@@ -117,26 +119,30 @@ def test_tdl_parser_errors():
         parse_tdl("agents:\n  - role: worker")
 
     with pytest.raises(TDLParseError, match="Duplicate agent name"):
-        parse_tdl("name: swarm\nagents:\n  - name: worker\n  - name: worker")
+        parse_tdl("agents:\n  - name: worker\n  - name: worker")
 
     with pytest.raises(TDLParseError):
         parse_tdl_file("/nonexistent/file/path/topology.yaml")
 
 
 def test_tool_permissions_wildcards_and_defaults():
+    # Wildcard allowed
     p1 = ToolPermissions(allowed_tools=["*"], denied_tools=["delete_database"])
     assert p1.is_tool_allowed("any_tool") is True
     assert p1.is_tool_allowed("delete_database") is False
 
+    # Default deny
     p2 = ToolPermissions(allowed_tools=["read_file"], default_allow=False)
     assert p2.is_tool_allowed("read_file") is True
     assert p2.is_tool_allowed("write_file") is False
 
+    # Default allow when empty
     p3 = ToolPermissions(default_allow=True)
     assert p3.is_tool_allowed("anything") is True
 
 
 def test_agent_instance_lifecycle():
+    orchestrator = UniverseOrchestrator()
     config = AgentConfig(
         name="test-agent",
         role="tester",
@@ -145,39 +151,45 @@ def test_agent_instance_lifecycle():
         permissions=ToolPermissions(allowed_tools=["read_file"], denied_tools=["execute_shell"]),
     )
 
-    agent = AgentInstance(config=config)
+    agent = AgentInstance(config=config, orchestrator=orchestrator)
     assert agent.status == AgentStatus.CREATED
 
+    # Spin-up
     assert agent.spin_up() is True
     assert agent.status == AgentStatus.RUNNING
-    assert agent.sandbox is not None
+    assert agent.universe is not None
 
-    prompt_path = os.path.join(agent.sandbox._setup_sandbox_dir(), "system_prompt.txt")
-    assert os.path.exists(prompt_path)
-    with open(prompt_path, "r", encoding="utf-8") as f:
-        assert f.read() == "Test agent prompt instructions."
+    # Check system prompt in VFS
+    vfs_prompt = agent.universe.read_virtual_file("/etc/system_prompt.txt")
+    assert vfs_prompt == "Test agent prompt instructions."
 
+    # Tool permission checking & execution
     assert agent.can_use_tool("read_file") is True
     assert agent.can_use_tool("execute_shell") is False
 
     res = agent.execute_tool("read_file", path="/tmp/env.json")
     assert res["status"] == "SUCCESS"
 
-    with pytest.raises(PermissionError, match="lacks permission"):
+    with pytest.raises(SecurityViolation, match="lacks permission"):
         agent.execute_tool("execute_shell", command="rm -rf /")
 
+    # Graceful termination
     assert agent.terminate(graceful=True) is True
     assert agent.status == AgentStatus.TERMINATED
-    assert agent.sandbox is None
+    assert agent.universe is None
+
+    orchestrator.close()
 
 
 def test_swarm_lifecycle_manager():
     topology = parse_tdl(SAMPLE_TDL_YAML)
+    orchestrator = UniverseOrchestrator()
 
-    swarm = SwarmLifecycleManager(topology=topology)
+    swarm = SwarmLifecycleManager(topology=topology, orchestrator=orchestrator)
     assert swarm.status == SwarmStatus.CREATED
     assert len(swarm.list_agents()) == 3
 
+    # Spin up entire swarm
     active_agents = swarm.spin_up_swarm()
     assert len(active_agents) == 3
     assert swarm.status == SwarmStatus.RUNNING
@@ -186,6 +198,7 @@ def test_swarm_lifecycle_manager():
     assert status_summary["running_agents"] == 3
     assert status_summary["topology_name"] == "software-dev-swarm"
 
+    # Verify agent instances have distinct prompts and permissions
     arch = swarm.get_agent("architect")
     dev = swarm.get_agent("developer")
     audit = swarm.get_agent("auditor")
@@ -195,6 +208,9 @@ def test_swarm_lifecycle_manager():
     assert arch.can_use_tool("execute_shell") is False
     assert dev.can_use_tool("execute_shell") is True
 
+    # Graceful termination
     term_res = swarm.terminate_swarm(graceful=True)
     assert all(term_res.values())
     assert swarm.status == SwarmStatus.TERMINATED
+
+    orchestrator.close()
