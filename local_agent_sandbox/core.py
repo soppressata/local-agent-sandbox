@@ -8,6 +8,7 @@ import re
 import resource
 import shutil
 import shlex
+import signal
 import subprocess
 import tempfile
 import time
@@ -27,10 +28,11 @@ class SandboxResult(BaseModel):
     sandboxed_dir: str
     blocked: bool = False
     block_reason: Optional[str] = None
+    status: str = "SUCCESS"
 
 
 class SandboxConfig(BaseModel):
-    max_timeout_seconds: float = 30.0
+    max_timeout_seconds: float = 3600.0
     allowed_env_vars: List[str] = Field(default_factory=lambda: ["PATH", "LANG", "LC_ALL", "PYTHONPATH", "HOME", "TERM"])
     blocked_commands: List[str] = Field(default_factory=lambda: [
         "rm -rf /", "rm -rf ~", "rm -rf *", "mkfs", "dd if=/dev/zero",
@@ -228,6 +230,7 @@ class LocalAgentSandbox:
                         sandboxed_dir=work_dir,
                         blocked=True,
                         block_reason="Execution timeout exceeded",
+                        status="TIMEOUT_EXCEEDED",
                     )
                 return SandboxResult(
                     command=command,
@@ -243,38 +246,61 @@ class LocalAgentSandbox:
             clean_env["TEMP"] = work_dir
             clean_env["TMP"] = work_dir
 
-            res = subprocess.run(
+            # start_new_session=True puts the command in its own process group so that
+            # on timeout we can signal the whole group, not just the direct child -
+            # otherwise any process the command itself spawns (e.g. a shell pipeline,
+            # or the command backgrounding work) survives the timeout and keeps
+            # running, which is exactly what AC2 ("terminates the agent process and
+            # any child processes it spawned") requires we not allow.
+            proc = subprocess.Popen(
                 command,
                 shell=True,
                 executable="/bin/bash",
                 cwd=work_dir,
                 env=clean_env,
                 preexec_fn=_apply_rlimits,
-                capture_output=True,
+                start_new_session=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.config.max_timeout_seconds,
             )
+            try:
+                stdout, stderr = proc.communicate(timeout=self.config.max_timeout_seconds)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    stdout, stderr = proc.communicate(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    stdout, stderr = proc.communicate()
+                duration_ms = (time.time() - start_time) * 1000
+                return SandboxResult(
+                    command=command,
+                    exit_code=124,
+                    stdout=stdout or "",
+                    stderr=(stderr or "") + f"\nCommand execution timed out after "
+                                             f"{self.config.max_timeout_seconds} seconds.",
+                    duration_ms=duration_ms,
+                    sandboxed_dir=work_dir,
+                    blocked=True,
+                    block_reason="Execution timeout exceeded",
+                    status="TIMEOUT_EXCEEDED",
+                )
             duration_ms = (time.time() - start_time) * 1000
             return SandboxResult(
                 command=command,
-                exit_code=res.returncode,
-                stdout=res.stdout,
-                stderr=res.stderr,
+                exit_code=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
                 duration_ms=duration_ms,
                 sandboxed_dir=work_dir,
                 blocked=False,
-            )
-        except subprocess.TimeoutExpired as e:
-            duration_ms = (time.time() - start_time) * 1000
-            return SandboxResult(
-                command=command,
-                exit_code=124,
-                stdout=e.stdout or "" if isinstance(e.stdout, str) else "",
-                stderr=f"Command execution timed out after {self.config.max_timeout_seconds} seconds.",
-                duration_ms=duration_ms,
-                sandboxed_dir=work_dir,
-                blocked=True,
-                block_reason="Execution timeout exceeded",
             )
         except JailSetupError as e:
             duration_ms = (time.time() - start_time) * 1000
