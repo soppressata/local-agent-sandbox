@@ -113,3 +113,44 @@ def test_robust_guardrails_blocked_bypasses():
         assert "Forbidden dangerous command" in res.stderr
         
     sandbox.cleanup()
+
+
+def test_configurable_execution_timeout_default():
+    config = SandboxConfig()
+    assert config.execution_timeout_seconds == 3600.0
+
+
+def test_configurable_execution_timeout_enforcement():
+    config = SandboxConfig(execution_timeout_seconds=0.5)
+    sandbox = LocalAgentSandbox(config=config)
+    res = sandbox.execute("sleep 2")
+    
+    assert res.status == "TimeoutError"
+    assert res.blocked is True
+    assert res.exit_code == 124
+    assert sandbox.status == "TimeoutError"
+    
+    # Verify timeout event is logged in execution history
+    history = sandbox.execution_history
+    assert len(history) > 0
+    timeout_events = [e for e in history if e.get("status") == "TimeoutError"]
+    assert len(timeout_events) > 0
+    assert timeout_events[0]["event"] == "timeout"
+    assert timeout_events[0]["command"] == "sleep 2"
+    
+    sandbox.cleanup()
+
+
+def test_agent_session_execution_timeout():
+    from local_agent_sandbox import AgentSession
+    config = SandboxConfig(execution_timeout_seconds=0.5)
+    session = AgentSession(config=config)
+    res = session.execute("sleep 2")
+    
+    assert res.status == "TimeoutError"
+    assert session.status == "TimeoutError"
+    assert len(session.execution_history) > 0
+    assert session.execution_history[-1]["status"] == "TimeoutError"
+    
+    session.cleanup()
+

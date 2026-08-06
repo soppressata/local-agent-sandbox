@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import tempfile
 import time
+import uuid
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 
@@ -25,10 +26,12 @@ class SandboxResult(BaseModel):
     sandboxed_dir: str
     blocked: bool = False
     block_reason: Optional[str] = None
+    status: Optional[str] = None
 
 
 class SandboxConfig(BaseModel):
     max_timeout_seconds: float = 30.0
+    execution_timeout_seconds: float = 3600.0
     allowed_env_vars: List[str] = Field(default_factory=lambda: ["PATH", "LANG", "LC_ALL", "PYTHONPATH", "HOME", "TERM"])
     blocked_commands: List[str] = Field(default_factory=lambda: [
         "rm -rf /", "rm -rf ~", "rm -rf *", "mkfs", "dd if=/dev/zero",
@@ -45,6 +48,9 @@ class LocalAgentSandbox:
         self.config = config or SandboxConfig()
         self.custom_dir = sandbox_dir
         self.temp_dir: Optional[str] = None
+        self.execution_history: List[Dict[str, Any]] = []
+        self.status: str = "RUNNING"
+        self.start_time: float = time.time()
 
     def _setup_sandbox_dir(self) -> str:
         if self.custom_dir:
@@ -147,10 +153,37 @@ class LocalAgentSandbox:
         """Execute command inside isolated sandbox environment."""
         start_time = time.time()
         
+        # Check overall session execution timeout
+        elapsed_session = start_time - self.start_time
+        remaining_session = self.config.execution_timeout_seconds - elapsed_session
+
+        if remaining_session <= 0:
+            self.status = "TimeoutError"
+            self.cleanup()
+            timeout_res = SandboxResult(
+                command=command,
+                exit_code=124,
+                stdout="",
+                stderr=f"Session execution timeout of {self.config.execution_timeout_seconds} seconds exceeded.",
+                duration_ms=0.0,
+                sandboxed_dir=self.temp_dir or self.custom_dir or "",
+                blocked=True,
+                block_reason="Execution timeout exceeded",
+                status="TimeoutError"
+            )
+            self.execution_history.append({
+                "event": "timeout",
+                "command": command,
+                "status": "TimeoutError",
+                "reason": f"Session execution timeout of {self.config.execution_timeout_seconds} seconds exceeded",
+                "timestamp": time.time()
+            })
+            return timeout_res
+
         # Check command safety guardrails
         block_reason = self.is_command_blocked(command)
         if block_reason:
-            return SandboxResult(
+            res = SandboxResult(
                 command=command,
                 exit_code=126,
                 stdout="",
@@ -158,8 +191,17 @@ class LocalAgentSandbox:
                 duration_ms=(time.time() - start_time) * 1000,
                 sandboxed_dir="",
                 blocked=True,
-                block_reason=block_reason
+                block_reason=block_reason,
+                status="BLOCKED"
             )
+            self.execution_history.append({
+                "event": "blocked",
+                "command": command,
+                "status": "BLOCKED",
+                "reason": block_reason,
+                "timestamp": time.time()
+            })
+            return res
 
         work_dir = self._setup_sandbox_dir()
 
@@ -223,6 +265,8 @@ class LocalAgentSandbox:
             except Exception:
                 pass
 
+        timeout_limit = min(self.config.max_timeout_seconds, self.config.execution_timeout_seconds, max(0.001, remaining_session))
+
         try:
             res = subprocess.run(
                 command,
@@ -233,33 +277,56 @@ class LocalAgentSandbox:
                 preexec_fn=_isolate_child,
                 capture_output=True,
                 text=True,
-                timeout=self.config.max_timeout_seconds
+                timeout=timeout_limit
             )
             duration_ms = (time.time() - start_time) * 1000
-            return SandboxResult(
+            result_status = "COMPLETED" if res.returncode == 0 else "FAILED"
+            sandbox_res = SandboxResult(
                 command=command,
                 exit_code=res.returncode,
                 stdout=res.stdout,
                 stderr=res.stderr,
                 duration_ms=duration_ms,
                 sandboxed_dir=work_dir,
-                blocked=False
+                blocked=False,
+                status=result_status
             )
+            self.execution_history.append({
+                "event": "execute",
+                "command": command,
+                "status": result_status,
+                "exit_code": res.returncode,
+                "timestamp": time.time(),
+                "duration_ms": duration_ms
+            })
+            return sandbox_res
         except subprocess.TimeoutExpired as e:
             duration_ms = (time.time() - start_time) * 1000
-            return SandboxResult(
+            self.status = "TimeoutError"
+            self.cleanup()
+            timeout_res = SandboxResult(
                 command=command,
                 exit_code=124,
                 stdout=e.stdout or "" if isinstance(e.stdout, str) else "",
-                stderr=f"Command execution timed out after {self.config.max_timeout_seconds} seconds.",
+                stderr=f"Command execution timed out after {timeout_limit} seconds.",
                 duration_ms=duration_ms,
                 sandboxed_dir=work_dir,
                 blocked=True,
-                block_reason="Execution timeout exceeded"
+                block_reason="Execution timeout exceeded",
+                status="TimeoutError"
             )
+            self.execution_history.append({
+                "event": "timeout",
+                "command": command,
+                "status": "TimeoutError",
+                "reason": f"Execution timeout of {timeout_limit} seconds exceeded",
+                "timestamp": time.time(),
+                "duration_ms": duration_ms
+            })
+            return timeout_res
         except Exception as e:
             duration_ms = (time.time() - start_time) * 1000
-            return SandboxResult(
+            err_res = SandboxResult(
                 command=command,
                 exit_code=1,
                 stdout="",
@@ -267,14 +334,63 @@ class LocalAgentSandbox:
                 duration_ms=duration_ms,
                 sandboxed_dir=work_dir,
                 blocked=True,
-                block_reason=str(e)
+                block_reason=str(e),
+                status="ERROR"
             )
+            self.execution_history.append({
+                "event": "error",
+                "command": command,
+                "status": "ERROR",
+                "reason": str(e),
+                "timestamp": time.time(),
+                "duration_ms": duration_ms
+            })
+            return err_res
 
     def cleanup(self):
-        """Clean up temporary sandbox directories."""
+        """Clean up temporary sandbox directories and processes."""
         if self.temp_dir and os.path.exists(self.temp_dir):
             try:
                 shutil.rmtree(self.temp_dir)
             except Exception:
                 pass
             self.temp_dir = None
+
+
+class AgentSession:
+    """
+    Manages an active agent session, maintaining execution history and enforcing execution timeouts.
+    """
+
+    def __init__(self, config: Optional[SandboxConfig] = None, sandbox_dir: Optional[str] = None):
+        """Initialize an AgentSession with optional SandboxConfig and sandbox_dir."""
+        self.config = config or SandboxConfig()
+        self.sandbox = LocalAgentSandbox(config=self.config, sandbox_dir=sandbox_dir)
+        self.session_id: str = f"session-{uuid.uuid4().hex[:8]}"
+
+    @property
+    def status(self) -> str:
+        """Return the current session status."""
+        return self.sandbox.status
+
+    @status.setter
+    def status(self, value: str) -> None:
+        self.sandbox.status = value
+
+    @property
+    def execution_history(self) -> List[Dict[str, Any]]:
+        """Return the session execution history."""
+        return self.sandbox.execution_history
+
+    def execute(self, command: str, env_overrides: Optional[Dict[str, str]] = None) -> SandboxResult:
+        """Execute a command within the agent session."""
+        return self.sandbox.execute(command, env_overrides=env_overrides)
+
+    def terminate_processes(self) -> None:
+        """Terminate all agent processes associated with this session."""
+        self.sandbox.cleanup()
+
+    def cleanup(self) -> None:
+        """Clean up session resources."""
+        self.sandbox.cleanup()
+
