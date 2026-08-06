@@ -24,7 +24,12 @@
 ### Key Features
 
 - **Sub-10ms Startup**: Launches isolated process sandboxes without heavy virtual machine or container daemon overhead.
-- **Namespace Isolation**: When `isolate_filesystem` is `True` (default), the sandbox unshares user, mount, UTS, and IPC namespaces (`CLONE_NEWUSER`, `CLONE_NEWNS`, `CLONE_NEWUTS`, `CLONE_NEWIPC`). This runs the sandboxed process as `nobody:nogroup` to isolate it from modifying the host system.
+- **Namespace Isolation**: When `isolate_filesystem` is `True` (default), the sandbox builds a real rootless jail:
+  1. Unshares user, mount, UTS, and IPC namespaces (`CLONE_NEWUSER`, `CLONE_NEWNS`, `CLONE_NEWUTS`, `CLONE_NEWIPC`).
+  2. Writes `/proc/self/uid_map` and `/proc/self/gid_map` so the process is fake-root only inside its own user namespace.
+  3. Makes mounts private, then chroots into a minimal jail whose root contains **read-only** bind mounts of host `/bin`, `/usr`, `/lib`, and `/lib64` (whichever exist), a minimal `/dev` (null/zero/full/random/urandom/tty), and a **read-write** bind of the sandbox work directory at `/workspace`.
+  4. Drops privileges with `setgid(65534)` / `setuid(65534)` (`nobody:nogroup`).
+  Host paths outside those bind mounts (e.g. `/etc`, `/home`, `/tmp`) are invisible inside the jail. If any isolation step fails, execution is refused (no silent fallback to an unisolated process).
 - **Resource Limits**: Restricts the process using `resource.setrlimit` on CPU time, virtual memory address space (RLIMIT_AS, defaulted to 1GB), maximum file size (RLIMIT_FSIZE, defaulted to 100MB), and process count (RLIMIT_NPROC, defaulted to 4096).
 - **Dangerous Command Guardrails**: A secondary defense-in-depth tokenizer parses commands using `shlex.split` to block dangerous command patterns (such as bypasses of `rm -rf /*`, `find / -delete`, redirects or writing to `/etc/shadow`, `.ssh`, `.aws`, and fork bombs).
 - **Execution Timeouts**: Enforces hard wall-clock timeouts on long-running commands.
@@ -94,14 +99,19 @@ finally:
 Here are key patterns and behaviors to keep in mind when working with the sandbox:
 
 1. **Namespace Isolation Permission Issues**:
-   Under the hood, filesystem isolation requires Linux user and mount namespaces (`CLONE_NEWUSER`, `CLONE_NEWNS`). If your environment (e.g. some Docker containers, CI pipelines, or specific Linux configurations) restricts unprivileged user namespaces, the sandbox will try to fall back gracefully. If you require strict namespace isolation, ensure your Linux kernel has user namespace cloning enabled:
+   Filesystem isolation requires:
+   - Linux unprivileged user namespaces (`CLONE_NEWUSER`, `CLONE_NEWNS`)
+   - The `uidmap` package (`newuidmap` / `newgidmap`) plus subordinate ID ranges in `/etc/subuid` and `/etc/subgid` (so the jail can map and drop to `nobody` / 65534)
+   If isolation cannot be established, the command is refused — it will **not** silently run unisolated. Enable user namespaces and install helpers:
    ```bash
    sysctl -w kernel.unprivileged_userns_clone=1
+   sudo apt-get install -y uidmap   # Debian/Ubuntu
    ```
-   Or disable filesystem namespace isolation explicitly if not needed:
+   Or disable filesystem isolation explicitly if not needed (command blocklist still applies):
    ```python
    config = SandboxConfig(isolate_filesystem=False)
    ```
+   Inside the jail only these host paths are visible: `/bin`, `/usr`, `/lib`, `/lib64` (read-only, if present on the host), a synthetic `/dev`, and the sandbox work directory mounted read-write at `/workspace`.
 
 2. **Cleaning Up Temp Directories**:
    The sandbox creates dynamic directories under `/tmp` to isolate workspace files. To avoid filling up disk space, **always** call `sandbox.cleanup()` (ideally in a `try...finally` block).

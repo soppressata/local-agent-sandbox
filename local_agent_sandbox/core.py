@@ -14,6 +14,8 @@ import time
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 
+from local_agent_sandbox.jail import JailSetupError, run_jailed
+
 
 
 class SandboxResult(BaseModel):
@@ -172,34 +174,10 @@ class LocalAgentSandbox:
         if env_overrides:
             clean_env.update(env_overrides)
         
-        clean_env["TMPDIR"] = work_dir
-        clean_env["TEMP"] = work_dir
-        clean_env["TMP"] = work_dir
+        timeout_s = self.config.max_timeout_seconds
 
-        def _isolate_child():
-            # 1. Namespace isolation
-            if self.config.isolate_filesystem:
-                flags = 0
-                for name, default_val in [
-                    ("CLONE_NEWUSER", 0x10000000),
-                    ("CLONE_NEWNS", 0x00020000),
-                    ("CLONE_NEWUTS", 0x04000000),
-                    ("CLONE_NEWIPC", 0x08000000),
-                ]:
-                    flags |= getattr(os, name, default_val)
-                try:
-                    os.unshare(flags)
-                except Exception:
-                    try:
-                        os.unshare(
-                            getattr(os, "CLONE_NEWUSER", 0x10000000) |
-                            getattr(os, "CLONE_NEWNS", 0x00020000)
-                        )
-                    except Exception:
-                        pass
-
-            # 2. Resource limits
-            cpu_limit = int(self.config.max_timeout_seconds) + 5
+        def _apply_rlimits():
+            cpu_limit = int(timeout_s) + 5
             try:
                 resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit + 5))
             except Exception:
@@ -224,16 +202,57 @@ class LocalAgentSandbox:
                 pass
 
         try:
+            if self.config.isolate_filesystem:
+                clean_env["TMPDIR"] = "/workspace"
+                clean_env["TEMP"] = "/workspace"
+                clean_env["TMP"] = "/workspace"
+                clean_env["HOME"] = "/workspace"
+                if "PATH" not in clean_env:
+                    clean_env["PATH"] = "/usr/bin:/bin"
+
+                code, stdout, stderr = run_jailed(
+                    command=command,
+                    work_dir=work_dir,
+                    env=clean_env,
+                    timeout_seconds=timeout_s,
+                    pre_exec=_apply_rlimits,
+                )
+                duration_ms = (time.time() - start_time) * 1000
+                if code == 124 and "timed out" in stderr:
+                    return SandboxResult(
+                        command=command,
+                        exit_code=124,
+                        stdout=stdout,
+                        stderr=stderr,
+                        duration_ms=duration_ms,
+                        sandboxed_dir=work_dir,
+                        blocked=True,
+                        block_reason="Execution timeout exceeded",
+                    )
+                return SandboxResult(
+                    command=command,
+                    exit_code=code,
+                    stdout=stdout,
+                    stderr=stderr,
+                    duration_ms=duration_ms,
+                    sandboxed_dir=work_dir,
+                    blocked=False,
+                )
+
+            clean_env["TMPDIR"] = work_dir
+            clean_env["TEMP"] = work_dir
+            clean_env["TMP"] = work_dir
+
             res = subprocess.run(
                 command,
                 shell=True,
                 executable="/bin/bash",
                 cwd=work_dir,
                 env=clean_env,
-                preexec_fn=_isolate_child,
+                preexec_fn=_apply_rlimits,
                 capture_output=True,
                 text=True,
-                timeout=self.config.max_timeout_seconds
+                timeout=self.config.max_timeout_seconds,
             )
             duration_ms = (time.time() - start_time) * 1000
             return SandboxResult(
@@ -243,7 +262,7 @@ class LocalAgentSandbox:
                 stderr=res.stderr,
                 duration_ms=duration_ms,
                 sandboxed_dir=work_dir,
-                blocked=False
+                blocked=False,
             )
         except subprocess.TimeoutExpired as e:
             duration_ms = (time.time() - start_time) * 1000
@@ -255,7 +274,19 @@ class LocalAgentSandbox:
                 duration_ms=duration_ms,
                 sandboxed_dir=work_dir,
                 blocked=True,
-                block_reason="Execution timeout exceeded"
+                block_reason="Execution timeout exceeded",
+            )
+        except JailSetupError as e:
+            duration_ms = (time.time() - start_time) * 1000
+            return SandboxResult(
+                command=command,
+                exit_code=1,
+                stdout="",
+                stderr=f"Sandbox isolation error: {e}",
+                duration_ms=duration_ms,
+                sandboxed_dir=work_dir,
+                blocked=True,
+                block_reason=str(e),
             )
         except Exception as e:
             duration_ms = (time.time() - start_time) * 1000
@@ -267,7 +298,7 @@ class LocalAgentSandbox:
                 duration_ms=duration_ms,
                 sandboxed_dir=work_dir,
                 blocked=True,
-                block_reason=str(e)
+                block_reason=str(e),
             )
 
     def cleanup(self):
