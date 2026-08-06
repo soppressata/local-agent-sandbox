@@ -40,3 +40,49 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["local_agent_sandbox*"]
+
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-agent-sandbox"
+version = "0.1.1"
+description = "Lightweight, sub-10ms local process sandbox for AI coding agents."
+readme = "README.md"
+authors = [
+    { name = "soppressata", email = "312807597+soppressata@users.noreply.github.com" }
+]
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries"
+]
+requires-python = ">=3.9"
+dependencies = [
+    "pydantic>=2.0.0",
+    "click>=8.0.0",
+    "pyyaml>=6.0"
+]
+
+[project.optional-dependencies]
+memory = ["rmbr>=0.2.0"]
+
+[project.scripts]
+lasb = "local_agent_sandbox.cli:main"
+sandboxctl = "local_agent_sandbox.cli:main"
+agent-sandbox = "local_agent_sandbox.cli:main"
+harness = "local_agent_sandbox.cli:main"
+openharness = "local_agent_sandbox.cli:main"
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::pytest.PytestCollectionWarning",
+    "ignore::DeprecationWarning",
+    "ignore:.*regex.*:DeprecationWarning",
+    "ignore:.*FastAPI.*:DeprecationWarning"
+]
