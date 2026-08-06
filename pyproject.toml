@@ -36,6 +36,9 @@ minversion = "7.0"
 addopts = "-ra -q --cov=local_agent_sandbox"
 testpaths = ["tests"]
 
+[tool.setuptools.packages.find]
+include = ["local_agent_sandbox*"]
+
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -74,3 +77,6 @@ agent-sandbox = "local_agent_sandbox.cli:cli"
 minversion = "7.0"
 addopts = "-ra -q --cov=local_agent_sandbox"
 testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["local_agent_sandbox*"]
