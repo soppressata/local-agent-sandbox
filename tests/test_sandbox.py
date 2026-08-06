@@ -1,4 +1,5 @@
 import os
+import time
 import pytest
 import getpass
 from local_agent_sandbox import LocalAgentSandbox, SandboxConfig, PolicyMemoryEngine
@@ -31,6 +32,41 @@ def test_execution_timeout():
     assert res.blocked is True
     assert res.exit_code == 124
     assert "timed out" in res.stderr
+    sandbox.cleanup()
+
+
+def test_execution_timeout_records_timout_status():
+    config = SandboxConfig(max_timeout_seconds=0.5)
+    sandbox = LocalAgentSandbox(config=config)
+    res = sandbox.execute("sleep 2")
+    assert res.status == "TIMEOUT_EXCEEDED"
+    assert res.block_reason == "Execution timeout exceeded"
+    sandbox.cleanup()
+
+
+def test_timeout_terminates_child_processes():
+    config = SandboxConfig(max_timeout_seconds=1.0)
+    sandbox = LocalAgentSandbox(config=config)
+    # Background a child, record its PID, then block the shell until the timeout.
+    res = sandbox.execute("sleep 30 & echo $! > child.pid; wait")
+    assert res.exit_code == 124
+    assert res.status == "TIMEOUT_EXCEEDED"
+
+    pid_file = os.path.join(res.sandboxed_dir, "child.pid")
+    with open(pid_file) as f:
+        child_pid = int(f.read().strip())
+
+    # The spawned child must not survive the sandbox timeout.
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail(f"child process {child_pid} survived the sandbox timeout")
+
     sandbox.cleanup()
 
 

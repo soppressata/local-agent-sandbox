@@ -8,6 +8,7 @@ import re
 import resource
 import shutil
 import shlex
+import signal
 import subprocess
 import tempfile
 import time
@@ -25,10 +26,11 @@ class SandboxResult(BaseModel):
     sandboxed_dir: str
     blocked: bool = False
     block_reason: Optional[str] = None
+    status: str = "SUCCESS"
 
 
 class SandboxConfig(BaseModel):
-    max_timeout_seconds: float = 30.0
+    max_timeout_seconds: float = 3600.0
     allowed_env_vars: List[str] = Field(default_factory=lambda: ["PATH", "LANG", "LC_ALL", "PYTHONPATH", "HOME", "TERM"])
     blocked_commands: List[str] = Field(default_factory=lambda: [
         "rm -rf /", "rm -rf ~", "rm -rf *", "mkfs", "dd if=/dev/zero",
@@ -143,6 +145,28 @@ class LocalAgentSandbox:
 
         return None
 
+    def _terminate_process_tree(self, proc: subprocess.Popen) -> None:
+        """Gracefully terminate ``proc`` and every process it spawned.
+
+        The sandboxed command runs as a session leader in its own process
+        group, so signalling the group terminates both the command and any
+        child processes it started. Sends SIGTERM first, then escalates to
+        SIGKILL after a short grace period so stragglers cannot outlive the
+        configured timeout.
+        """
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait()
+
     def execute(self, command: str, env_overrides: Optional[Dict[str, str]] = None) -> SandboxResult:
         """Execute command inside isolated sandbox environment."""
         start_time = time.time()
@@ -158,7 +182,8 @@ class LocalAgentSandbox:
                 duration_ms=(time.time() - start_time) * 1000,
                 sandboxed_dir="",
                 blocked=True,
-                block_reason=block_reason
+                block_reason=block_reason,
+                status="BLOCKED"
             )
 
         work_dir = self._setup_sandbox_dir()
@@ -177,6 +202,12 @@ class LocalAgentSandbox:
         clean_env["TMP"] = work_dir
 
         def _isolate_child():
+            # 0. Start a fresh session so the whole process group can be signalled on timeout.
+            try:
+                os.setsid()
+            except Exception:
+                pass
+
             # 1. Namespace isolation
             if self.config.isolate_filesystem:
                 flags = 0
@@ -224,38 +255,43 @@ class LocalAgentSandbox:
                 pass
 
         try:
-            res = subprocess.run(
+            proc = subprocess.Popen(
                 command,
                 shell=True,
                 executable="/bin/bash",
                 cwd=work_dir,
                 env=clean_env,
                 preexec_fn=_isolate_child,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.config.max_timeout_seconds
             )
+            try:
+                stdout, stderr = proc.communicate(timeout=self.config.max_timeout_seconds)
+            except subprocess.TimeoutExpired as e:
+                self._terminate_process_tree(proc)
+                duration_ms = (time.time() - start_time) * 1000
+                return SandboxResult(
+                    command=command,
+                    exit_code=124,
+                    stdout=e.stdout or "" if isinstance(e.stdout, str) else "",
+                    stderr=f"Command execution timed out after {self.config.max_timeout_seconds} seconds.",
+                    duration_ms=duration_ms,
+                    sandboxed_dir=work_dir,
+                    blocked=True,
+                    block_reason="Execution timeout exceeded",
+                    status="TIMEOUT_EXCEEDED"
+                )
             duration_ms = (time.time() - start_time) * 1000
             return SandboxResult(
                 command=command,
-                exit_code=res.returncode,
-                stdout=res.stdout,
-                stderr=res.stderr,
+                exit_code=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
                 duration_ms=duration_ms,
                 sandboxed_dir=work_dir,
-                blocked=False
-            )
-        except subprocess.TimeoutExpired as e:
-            duration_ms = (time.time() - start_time) * 1000
-            return SandboxResult(
-                command=command,
-                exit_code=124,
-                stdout=e.stdout or "" if isinstance(e.stdout, str) else "",
-                stderr=f"Command execution timed out after {self.config.max_timeout_seconds} seconds.",
-                duration_ms=duration_ms,
-                sandboxed_dir=work_dir,
-                blocked=True,
-                block_reason="Execution timeout exceeded"
+                blocked=False,
+                status="SUCCESS" if proc.returncode == 0 else "FAILED"
             )
         except Exception as e:
             duration_ms = (time.time() - start_time) * 1000
@@ -267,7 +303,8 @@ class LocalAgentSandbox:
                 duration_ms=duration_ms,
                 sandboxed_dir=work_dir,
                 blocked=True,
-                block_reason=str(e)
+                block_reason=str(e),
+                status="FAILED"
             )
 
     def cleanup(self):

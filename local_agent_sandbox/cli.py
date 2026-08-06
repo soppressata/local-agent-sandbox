@@ -17,7 +17,7 @@ def cli():
 
 @cli.command()
 @click.argument("command")
-@click.option("--timeout", default=30.0, help="Maximum execution timeout in seconds.")
+@click.option("--timeout", default=3600.0, help="Maximum execution timeout in seconds (default: 3600).")
 @click.option("--dir", default=None, help="Custom sandbox directory path.")
 def run(command: str, timeout: float, dir: str):
     """Run a bash command inside isolated local sandbox."""
@@ -29,6 +29,8 @@ def run(command: str, timeout: float, dir: str):
 
     if result.blocked:
         click.secho(f"❌ BLOCKED: {result.stderr}", fg="red", bold=True)
+        if result.status == "TIMEOUT_EXCEEDED":
+            click.secho(f"   Status: {result.status}", fg="red", bold=True)
     else:
         color = "green" if result.exit_code == 0 else "red"
         click.secho(f"Exit Code: {result.exit_code} ({result.duration_ms:.1f}ms)", fg=color, bold=True)
