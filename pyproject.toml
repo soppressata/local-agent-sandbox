@@ -21,7 +21,8 @@ classifiers = [
 requires-python = ">=3.9"
 dependencies = [
     "pydantic>=2.0.0",
-    "click>=8.0.0"
+    "click>=8.0.0",
+    "pyyaml>=6.0"
 ]
 
 [project.optional-dependencies]
@@ -34,3 +35,4 @@ agent-sandbox = "local_agent_sandbox.cli:cli"
 minversion = "7.0"
 addopts = "-ra -q --cov=local_agent_sandbox"
 testpaths = ["tests"]
+
