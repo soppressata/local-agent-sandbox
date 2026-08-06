@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import getpass
 from local_agent_sandbox import LocalAgentSandbox, SandboxConfig, PolicyMemoryEngine
 
@@ -30,6 +31,33 @@ def test_execution_timeout():
     assert res.blocked is True
     assert res.exit_code == 124
     assert "timed out" in res.stderr
+    assert res.status == "TIMEOUT_EXCEEDED"
+    sandbox.cleanup()
+
+
+def test_default_timeout_is_one_hour():
+    assert SandboxConfig().max_timeout_seconds == 3600.0
+
+
+def test_successful_run_has_success_status():
+    sandbox = LocalAgentSandbox()
+    res = sandbox.execute("echo ok")
+    assert res.status == "SUCCESS"
+    sandbox.cleanup()
+
+
+def test_timeout_terminates_child_processes(tmp_path):
+    # The timed-out command spawns a background child (via `sleep 5 &`) that
+    # outlives the parent shell unless the whole process group is signalled.
+    # Have the child write a marker file after it wakes up; if the child was
+    # properly killed, the marker must never appear.
+    marker = tmp_path / "child_survived"
+    config = SandboxConfig(max_timeout_seconds=0.5, isolate_filesystem=False)
+    sandbox = LocalAgentSandbox(config=config)
+    res = sandbox.execute(f"(sleep 1 && touch {marker}) & sleep 2")
+    assert res.status == "TIMEOUT_EXCEEDED"
+    time.sleep(1.5)  # give the child a chance to run if it wasn't actually killed
+    assert not marker.exists(), "child process survived the timeout and wrote its marker"
     sandbox.cleanup()
 
 
