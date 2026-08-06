@@ -113,3 +113,16 @@ def test_robust_guardrails_blocked_bypasses():
         assert "Forbidden dangerous command" in res.stderr
         
     sandbox.cleanup()
+
+
+def test_network_and_sandbox_modules():
+    from local_agent_sandbox.network import isolate_network
+    from local_agent_sandbox.sandbox import get_resource_usage
+
+    proxy = isolate_network(allowed_patterns=["*.allowed.com"])
+    assert proxy.validate_egress("test.allowed.com") is True
+
+    usage = get_resource_usage()
+    assert "cpu" in usage
+    assert "kernel_violations" in usage
+
