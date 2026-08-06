@@ -31,31 +31,146 @@
 - **Environment Isolation**: Sanitizes environment variables to prevent host API key leakage.
 - **Optional `rmbr` Integration**: Stores security policy violations in local `rmbr` memory.
 
-### Installation
+---
+
+### Getting Started
+
+Follow these four quick steps to set up and run your first secure sandbox command in under 5 minutes.
+
+#### Step 1: Installation
+
+Install the package via `pip`:
 
 ```bash
 pip install local-agent-sandbox
 ```
 
-### Quickstart
+*Note: If you plan to use `rmbr` security memory integration, install with the optional dependency group:*
+```bash
+pip install "local-agent-sandbox[memory]"
+```
+
+#### Step 2: First Run (CLI)
+
+Verify your installation by running a simple echo command in the sandbox CLI:
+
+```bash
+agent-sandbox run "echo 'Hello from CLI sandbox!'"
+```
+
+#### Step 3: First Run (Python API)
+
+Create a Python script (e.g. `quickstart.py`) with the following copy-pasteable, complete, and verified code to run your first command and inspect the result:
 
 ```python
 from local_agent_sandbox import LocalAgentSandbox, SandboxConfig
 
-sandbox = LocalAgentSandbox(config=SandboxConfig(max_timeout_seconds=10.0))
+# 1. Initialize the sandbox with a 10-second timeout limit
+config = SandboxConfig(max_timeout_seconds=10.0)
+sandbox = LocalAgentSandbox(config=config)
 
-# Execute bash command safely
-result = sandbox.execute("echo 'Running in sandbox'")
-print(f"Exit Code: {result.exit_code} ({result.duration_ms:.1f}ms)")
-print(result.stdout)
+try:
+    # 2. Execute a basic bash command safely
+    result = sandbox.execute("echo 'Hello from the sandbox!'")
+    
+    # 3. Print all properties of the returned SandboxResult object
+    print("--- SandboxResult Properties ---")
+    print(f"Command:      {result.command}")
+    print(f"Exit Code:    {result.exit_code}")
+    print(f"Stdout:       {result.stdout.strip()}")
+    print(f"Stderr:       {result.stderr.strip()}")
+    print(f"Duration:     {result.duration_ms:.2f} ms")
+    print(f"Sandbox Dir:  {result.sandboxed_dir}")
+    print(f"Blocked:      {result.blocked}")
+    print(f"Block Reason: {result.block_reason}")
 
-sandbox.cleanup()
+finally:
+    # 4. Always clean up temporary directories to prevent disk clutter
+    sandbox.cleanup()
 ```
+
+#### Step 4: Troubleshooting & Common Gotchas
+
+Here are key patterns and behaviors to keep in mind when working with the sandbox:
+
+1. **Namespace Isolation Permission Issues**:
+   Under the hood, filesystem isolation requires Linux user and mount namespaces (`CLONE_NEWUSER`, `CLONE_NEWNS`). If your environment (e.g. some Docker containers, CI pipelines, or specific Linux configurations) restricts unprivileged user namespaces, the sandbox will try to fall back gracefully. If you require strict namespace isolation, ensure your Linux kernel has user namespace cloning enabled:
+   ```bash
+   sysctl -w kernel.unprivileged_userns_clone=1
+   ```
+   Or disable filesystem namespace isolation explicitly if not needed:
+   ```python
+   config = SandboxConfig(isolate_filesystem=False)
+   ```
+
+2. **Cleaning Up Temp Directories**:
+   The sandbox creates dynamic directories under `/tmp` to isolate workspace files. To avoid filling up disk space, **always** call `sandbox.cleanup()` (ideally in a `try...finally` block).
+
+3. **Environment Variable Filtering**:
+   To prevent host API key leakage, the sandbox runs commands with a highly restricted set of environment variables (by default: `PATH`, `LANG`, `LC_ALL`, `PYTHONPATH`, `HOME`, `TERM`).
+   - If your commands require specific environment variables, pass them explicitly using `env_overrides`:
+     ```python
+     result = sandbox.execute("echo $API_KEY", env_overrides={"API_KEY": "secret_key"})
+     ```
+   - Alternatively, add custom variables to the allowed list in `SandboxConfig`:
+     ```python
+     config = SandboxConfig(allowed_env_vars=["PATH", "CUSTOM_VAR"])
+     ```
+
+---
+
+### Detailed Usage Examples
+
+#### Handling Blocked Commands
+
+The sandbox includes robust defense-in-depth safety filters. If a command tries to touch sensitive paths (e.g. `/etc/shadow`, `.ssh`, `.aws`) or perform dangerous operations, the execution is blocked immediately before starting the process:
+
+```python
+from local_agent_sandbox import LocalAgentSandbox
+
+sandbox = LocalAgentSandbox()
+
+try:
+    result = sandbox.execute("rm -rf /etc/shadow")
+    if result.blocked:
+        print(f"❌ Command Blocked! Reason: {result.block_reason}")
+        print(f"Exit Code: {result.exit_code}")  # Blocked commands return exit code 126
+finally:
+    sandbox.cleanup()
+```
+
+#### Handling Execution Timeouts
+
+You can set wall-clock limits on long-running commands to prevent hung processes:
+
+```python
+from local_agent_sandbox import LocalAgentSandbox, SandboxConfig
+
+# Set a strict 2-second timeout
+config = SandboxConfig(max_timeout_seconds=2.0)
+sandbox = LocalAgentSandbox(config=config)
+
+try:
+    result = sandbox.execute("sleep 5")
+    if result.exit_code == 124:
+        print("🕒 Command execution timed out!")
+        print(f"Stderr: {result.stderr}")
+finally:
+    sandbox.cleanup()
+```
+
+---
 
 ### CLI Usage
 
+The CLI tool allows running command-line sandboxing out of the box.
+
 ```bash
+# Execute command with default configuration
 agent-sandbox run "ls -la"
+
+# Execute command with customized timeout and directory
+agent-sandbox run "sleep 5" --timeout 10.0 --dir "/tmp/my_custom_sandbox"
 ```
 
 ---
