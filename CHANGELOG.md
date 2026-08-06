@@ -1,3 +1,4 @@
+- **Feature**: Epic: Multi-Agent Swarm Orchestration Engine (Issue #24)
 - **Feature**: Add resource usage reporting to sandbox output (Issue #16)
 - **Feature**: Add network namespace isolation option (Issue #15)
 - **Feature**: Decentralized Swarm Intelligence Protocol for Cross-Sandbox Collaboration (Issue #14)
