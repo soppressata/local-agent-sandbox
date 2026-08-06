@@ -24,6 +24,10 @@ from local_agent_sandbox.messaging import (
     MessageBus, VirtualInbox, Message, MessageKind, InboxNotFoundError,
     InboxOverflowError,
 )
+from local_agent_sandbox.shared_context import (
+    SharedContext, SharedStateStore, SharedVectorStore, StateEntry,
+    VectorEntry, SearchResult,
+)
 
 __all__ = [
     "LocalAgentSandbox",
@@ -47,4 +51,10 @@ __all__ = [
     "MessageKind",
     "InboxNotFoundError",
     "InboxOverflowError",
+    "SharedContext",
+    "SharedStateStore",
+    "SharedVectorStore",
+    "StateEntry",
+    "VectorEntry",
+    "SearchResult",
 ]

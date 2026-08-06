@@ -16,6 +16,7 @@ import yaml
 from .orchestrator import UniverseOrchestrator, Universe, UniverseStatus, ComputeQuota
 from .isolation import SecurityViolation
 from .messaging import Message, MessageBus, VirtualInbox
+from .shared_context import SearchResult, SharedContext, VectorEntry
 
 
 class TDLParseError(ValueError):
@@ -342,6 +343,7 @@ class AgentInstance:
         orchestrator: Optional[UniverseOrchestrator] = None,
         agent_id: Optional[str] = None,
         message_bus: Optional[MessageBus] = None,
+        shared_context: Optional[SharedContext] = None,
     ):
         self.agent_id = agent_id or f"agent-{config.name}-{uuid.uuid4().hex[:6]}"
         self.config = config
@@ -354,6 +356,7 @@ class AgentInstance:
         self.logs: List[str] = []
         self.message_bus = message_bus or MessageBus()
         self.inbox: Optional[VirtualInbox] = None
+        self.shared_context = shared_context or SharedContext()
 
     def log(self, message: str):
         """Appends a timestamped log entry."""
@@ -483,6 +486,32 @@ class AgentInstance:
         """Return the number of unread messages for this agent."""
         return self.inbox.unread_count if self.inbox else 0
 
+    def set_shared_state(self, key: str, value: Any, owner: Optional[str] = None) -> int:
+        """Write a key-value pair into the shared swarm memory."""
+        return self.shared_context.remember(key, value, owner=owner or self.config.name)
+
+    def get_shared_state(self, key: str, default: Any = None) -> Any:
+        """Read a value from the shared swarm memory."""
+        return self.shared_context.recall(key, default)
+
+    def compare_and_set_shared_state(self, key: str, expected: Any, value: Any) -> bool:
+        """Atomically update shared state only when ``key`` still equals ``expected``."""
+        return self.shared_context.state.compare_and_set(
+            key, expected, value, owner=self.config.name
+        )
+
+    def store_shared_vector(self, vector_id: str, vector: List[float],
+                            metadata: Optional[Dict[str, Any]] = None) -> VectorEntry:
+        """Store a context vector into the shared memory of the swarm."""
+        return self.shared_context.store_vector(
+            vector_id, vector, metadata, owner=self.config.name
+        )
+
+    def search_shared_vectors(self, vector: List[float], top_k: int = 10,
+                              min_score: float = 0.0) -> List[SearchResult]:
+        """Search the swarm's shared vectors for the closest matches."""
+        return self.shared_context.query_vector(vector, top_k=top_k, min_score=min_score)
+
     def get_status(self) -> Dict[str, Any]:
         """Returns detailed status information for the agent instance."""
         return {
@@ -517,15 +546,22 @@ class SwarmLifecycleManager:
         topology: TDLTopology,
         orchestrator: Optional[UniverseOrchestrator] = None,
         message_bus: Optional[MessageBus] = None,
+        shared_context: Optional[SharedContext] = None,
     ):
         self.topology = topology
         self.orchestrator = orchestrator or UniverseOrchestrator()
         self.message_bus = message_bus or MessageBus()
+        self.shared_context = shared_context or SharedContext()
         self.agents: Dict[str, AgentInstance] = {}
         self.status = SwarmStatus.CREATED
 
         for agent_cfg in topology.agents:
-            instance = AgentInstance(config=agent_cfg, orchestrator=self.orchestrator, message_bus=self.message_bus)
+            instance = AgentInstance(
+                config=agent_cfg,
+                orchestrator=self.orchestrator,
+                message_bus=self.message_bus,
+                shared_context=self.shared_context,
+            )
             self.agents[agent_cfg.name] = instance
 
     def spin_up_swarm(self) -> List[AgentInstance]:
@@ -606,3 +642,7 @@ class SwarmLifecycleManager:
     def get_inbox(self, owner: str) -> Optional[VirtualInbox]:
         """Return the virtual inbox for a swarm agent."""
         return self.message_bus.get_inbox(owner)
+
+    def get_shared_context(self) -> SharedContext:
+        """Return the shared context (state + vector store) for this swarm."""
+        return self.shared_context
