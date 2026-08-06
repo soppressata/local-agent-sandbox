@@ -3,6 +3,7 @@ LocalAgentSandbox Core Engine
 Lightweight, zero-dependency local process sandbox for AI coding agents.
 """
 
+import math
 import os
 import re
 import resource
@@ -36,6 +37,9 @@ class SandboxConfig(BaseModel):
     ])
     isolate_filesystem: bool = True
     enable_rmbr_memory: bool = False
+    max_memory_mb: Optional[int] = Field(default=None, description="Virtual memory cap in MiB (defaults to 1024).")
+    max_disk_mb: Optional[int] = Field(default=None, description="Per-file write cap in MiB (defaults to 100).")
+    max_cpu_cores: Optional[float] = Field(default=None, description="CPU core cap applied via sched_setaffinity when set.")
 
 
 class LocalAgentSandbox:
@@ -205,14 +209,24 @@ class LocalAgentSandbox:
             except Exception:
                 pass
 
-            mem_limit = 1024 * 1024 * 1024  # 1 GB
+            if self.config.max_cpu_cores is not None:
+                try:
+                    total_cpus = os.cpu_count() or 1
+                    pinned = max(1, int(math.ceil(self.config.max_cpu_cores)))
+                    os.sched_setaffinity(0, set(range(min(pinned, total_cpus))))
+                except Exception:
+                    pass
+
+            mem_mb = self.config.max_memory_mb if self.config.max_memory_mb is not None else 1024
             try:
+                mem_limit = mem_mb * 1024 * 1024
                 resource.setrlimit(resource.RLIMIT_AS, (mem_limit, mem_limit))
             except Exception:
                 pass
 
-            fsize_limit = 100 * 1024 * 1024  # 100 MB
+            fsize_mb = self.config.max_disk_mb if self.config.max_disk_mb is not None else 100
             try:
+                fsize_limit = fsize_mb * 1024 * 1024
                 resource.setrlimit(resource.RLIMIT_FSIZE, (fsize_limit, fsize_limit))
             except Exception:
                 pass

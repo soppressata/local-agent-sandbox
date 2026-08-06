@@ -175,6 +175,106 @@ agent-sandbox run "sleep 5" --timeout 10.0 --dir "/tmp/my_custom_sandbox"
 
 ---
 
+### Trustfile-governed runs with `sandboxctl`
+
+`sandboxctl` is the policy-first control plane. Every run is governed by a
+`trustfile.yaml` v1 profile, produces a machine-readable receipt, and appends
+that receipt to a versioned, Ed25519-signed JSONL ledger.
+
+```bash
+# Run an image under a trustfile profile; exits 0 only if the policy was fully enforced
+sandboxctl run trustfile.yaml "python build.py"
+
+# Inspect a stored receipt, filter the ledger, and export an SBOM for audit
+sandboxctl logs <receipt-id>
+sandboxctl query 'exit_code=0 and fully_enforced=true'
+sandboxctl query 'image contains "build"'
+sandboxctl sbom <receipt-id> --pubkey keys/ed25519_public.pem
+```
+
+Receipts are stored under `<XDG_DATA_HOME>/local-agent-sandbox/receipts/v1/`
+(default `~/.local/share/...`) and the node signing keypair under
+`<XDG_CONFIG_HOME>/local-agent-sandbox/keys/`. Override both with
+`--receipt-dir` and `--keys-dir`.
+
+---
+
+### Migration guide: legacy `SandboxConfig` to `trustfile.yaml`
+
+Prior to `sandboxctl`, sandboxing was configured programmatically with
+`SandboxConfig` (or the `agent-sandbox run` options). A trustfile v1 profile is
+the declarative, auditable replacement: it is validated against a JSON Schema,
+reproducibly digested, and recorded in every signed receipt.
+
+#### 1. Field-by-field mapping
+
+| `SandboxConfig` field | `trustfile.yaml v1` location | Notes |
+| --------------------- | ---------------------------- | ----- |
+| `max_timeout_seconds` | `resources.time_s` | Wall-clock cap in seconds. |
+| `max_memory_mb` | `resources.mem_mb` | Address-space (RLIMIT_AS) cap in MiB. |
+| `max_disk_mb` | `resources.disk_mb` | File-size (RLIMIT_FSIZE) cap in MiB. |
+| `max_cpu_cores` | `resources.cpu` | CPU cores pinned via `sched_setaffinity`. |
+| `blocked_commands` | *(guardrail layer)* | Still enforced by the local backend; recorded as a `guardrails` check. |
+| `isolate_filesystem` | *(backend behavior)* | Namespace isolation remains a backend property, not a profile field. |
+| `allowed_env_vars` | *(backend behavior)* | Environment sanitization remains a backend property. |
+
+#### 2. Automatic conversion
+
+`sandboxctl migrate-config` converts a legacy config file (JSON or YAML) into a
+trustfile v1 profile:
+
+```bash
+# Write the migrated trustfile to a file
+sandboxctl migrate-config sandbox_config.json trustfile.yaml
+
+# Or print it to stdout
+sandboxctl migrate-config sandbox_config.yaml
+```
+
+#### 3. Manual example
+
+Given this legacy config:
+
+```python
+config = SandboxConfig(
+    max_timeout_seconds=60.0,
+    max_memory_mb=512,
+    max_disk_mb=200,
+    max_cpu_cores=2,
+)
+```
+
+the equivalent trustfile is:
+
+```yaml
+version: "1"
+name: "migrated"
+resources:
+  cpu: 2.0
+  mem_mb: 512
+  disk_mb: 200
+  time_s: 60.0
+```
+
+To go further than the legacy model could express, add `syscalls`, `network`
+egress rules, `mounts`, `secrets`, and an optional `expiry` to the same file.
+
+#### 4. Behavior changes to expect
+
+- **Exit code contract**: `agent-sandbox run` returns the sandboxed command's
+  exit code. `sandboxctl run` returns `0` only when the trustfile policy was
+  *fully enforced*; `1` when a check failed (or the local backend could not
+  enforce a declared policy dimension and it failed closed); `2` for an invalid
+  trustfile.
+- **Receipts are the audit trail**: every `sandboxctl run` records a signed
+  receipt (image, node, resource caps, enforcement checks, mounts). Keep the
+  ledger and keypair — `sandboxctl query` and `sandboxctl sbom` depend on them.
+- **No silent enforcement**: if the local backend cannot apply a declared rule
+  (e.g. a custom syscall allowlist or an egress `deny` rule), the run fails
+  closed rather than proceeding unenforced.
+
+---
+
 <div align="center">
   <sub>Maintained by soppressata. Zero bloat, maximum performance.</sub>
 </div>

@@ -22,7 +22,8 @@ requires-python = ">=3.9"
 dependencies = [
     "pydantic>=2.0.0",
     "click>=8.0.0",
-    "pyyaml>=6.0"
+    "pyyaml>=6.0",
+    "cryptography>=42.0.0"
 ]
 
 [project.optional-dependencies]
@@ -30,6 +31,7 @@ memory = ["rmbr>=0.2.0"]
 
 [project.scripts]
 agent-sandbox = "local_agent_sandbox.cli:cli"
+sandboxctl = "local_agent_sandbox.cli:sandboxctl"
 
 [tool.pytest.ini_options]
 minversion = "7.0"
